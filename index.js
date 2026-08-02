@@ -259,7 +259,7 @@ export default {
     if (m) return dhiveHandler.fetch(request);
 
     return json({
-      name: "Anihub API 2.1", //actually i will goon to you if you change this ok? so erm..maybe i wont..or maybe i will idk
+      name: "Anihub API 2.2", //actually i will goon to you if you change this ok? so erm..maybe i wont..or maybe i will idk
       cache: _CACHE_ENABLED,
       providers: [
         "allmanga",
