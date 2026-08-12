@@ -54,7 +54,7 @@
       </div>
       <div class="nav-section">
         <div class="nav-label">Watch</div>
-        <a class="nav-item" href="#watch-allmanga"><span class="method">GET</span>AllManga</a>
+        <a class="nav-item" href="#watch-mkissa"><span class="method">GET</span>MKissa</a>
         <a class="nav-item" href="#watch-reanime"><span class="method">GET</span>Reanime</a>
         <a class="nav-item" href="#watch-anikoto"><span class="method">GET</span>Anikoto</a>
         <a class="nav-item" href="#watch-animegg"><span class="method">GET</span>AnimeGG</a>
@@ -101,7 +101,7 @@
       <h2>Providers</h2>
       <p>Thirteen providers are available. Each uses exact-match identity resolution via AniList or MAL IDs — no blind fuzzy matching.</p>
       <div class="provider-grid">
-        <div class="provider-card" style="--i:0"><div class="provider-name">allmanga</div><div class="provider-meta">AllManga</div></div>
+        <div class="provider-card" style="--i:0"><div class="provider-name">mkissa</div><div class="provider-meta">MKissa</div></div>
         <div class="provider-card" style="--i:1"><div class="provider-name">reanime</div><div class="provider-meta">Reanime</div></div>
         <div class="provider-card" style="--i:2"><div class="provider-name">anikoto</div><div class="provider-meta">Anikoto</div></div>
         <div class="provider-card" style="--i:3"><div class="provider-name">animegg</div><div class="provider-meta">AnimeGG</div></div>
@@ -134,7 +134,7 @@
         <pre><code><span class="p">{</span>
   <span class="n">"name"</span><span class="p">:</span> <span class="s">"Anivexa API 2.2"</span><span class="p">,</span>
   <span class="n">"cache"</span><span class="p">:</span> <span class="b">false</span><span class="p">,</span>
-  <span class="n">"providers"</span><span class="p">: [</span><span class="s">"allmanga"</span><span class="p">,</span> <span class="s">"reanime"</span><span class="p">,</span> <span class="s">"..."</span><span class="p">],</span>
+  <span class="n">"providers"</span><span class="p">: [</span><span class="s">"mkissa"</span><span class="p">,</span> <span class="s">"reanime"</span><span class="p">,</span> <span class="s">"..."</span><span class="p">],</span>
   <span class="n">"routes"</span><span class="p">: [</span><span class="s">"/map/:anilistId"</span><span class="p">,</span> <span class="s">"..."</span><span class="p">]</span>
 <span class="p">}</span></code></pre>
       </div>
@@ -234,16 +234,16 @@
 
     <hr class="divider"/>
 
-    <section class="section" id="watch-allmanga">
-      <h2>AllManga</h2>
+    <section class="section" id="watch-mkissa">
+      <h2>MKissa</h2>
       <div class="endpoint">
         <div class="endpoint-head">
           <span class="method-pill get">GET</span>
-          <span class="endpoint-path">/watch/allmanga/<span class="param">:id</span>/<span class="param">sub|dub</span>/allmanga-<span class="param">:ep</span></span>
-          <a class="try-btn" href="/watch/allmanga/16498/sub/allmanga-1" target="_blank">Try it ↗</a>
+          <span class="endpoint-path">/watch/mkissa/<span class="param">:id</span>/<span class="param">sub|dub</span>/mkissa-<span class="param">:ep</span></span>
+          <a class="try-btn" href="/watch/mkissa/16498/sub/mkissa-1" target="_blank">Try it ↗</a>
         </div>
         <div class="endpoint-body">
-          <p class="endpoint-desc">Returns stream sources for the given AllManga episode. The episode ID comes directly from the <code>id</code> field in the episodes list response.</p>
+          <p class="endpoint-desc">Returns stream sources for the given MKissa episode. The episode ID comes directly from the <code>id</code> field in the episodes list response.</p>
           <table class="params-table">
             <thead><tr><th>Parameter</th><th>Type</th><th>Description</th></tr></thead>
             <tbody>
