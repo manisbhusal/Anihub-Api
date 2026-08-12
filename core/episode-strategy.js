@@ -2,7 +2,7 @@ import {
   getAsync, setAsync, isFresh, needsRefresh,
   episodeTTL, jikanPageTTL,
 } from "./smartcache.js";
-import { getEpisodes as mangaEpisodes   } from "../providers/allmanga.js";
+import { getEpisodes as mkissaEpisodes } from "../providers/mkissa.js";
 import { getEpisodes as reanimeEpisodes } from "../providers/reanime.js";
 import { getEpisodes as anikotoEpisodes } from "../providers/anikoto.js";
 import { getEpisodes as animeggEpisodes } from "../providers/animegg.js";
@@ -162,7 +162,7 @@ async function safe(label, fn) {
 }
 
 const PROVIDER_ALIASES = {
-  allmanga: "allmanga",
+  mkissa: "mkissa",
   reanime:  "reanime",
   anikoto:  "anikoto",
   animegg:  "animegg",
@@ -190,7 +190,7 @@ export function resolveProviders(rawNames) {
 
 function providerFns(anilistId, status, ctx) {
   return {
-    allmanga: () => withCache(`epv:manga:${anilistId}`,   status, () => mangaEpisodes(anilistId, ctx)),
+    mkissa: () => withCache(`epv:mkissa:${anilistId}`, status, () => mkissaEpisodes(anilistId, ctx)),
     reanime:  () => withCache(`epv:reanime:${anilistId}`, status, () => reanimeEpisodes(anilistId, ctx)),
     anikoto:  () => withCache(`epv:anikoto:${anilistId}`, status, () => anikotoEpisodes(anilistId, ctx)),
     animegg:  () => withCache(`epv:animegg:${anilistId}`, status, () => animeggEpisodes(anilistId, ctx)),
@@ -237,8 +237,8 @@ export async function buildEpisodesWithCache(anilistId, media, anizip) {
 
   const ctx = { media, anizip, jikanEps, maxPages: undefined };
 
-  const [manga, reanime, anikoto, animegg, anineko, anidbapp, dhive, animenosub, anizone, anibd, senshi, kaa, animedunya] = await Promise.all([
-    safe("allmanga",   () => withCache(`epv:manga:${anilistId}`,      status, () => mangaEpisodes(anilistId, ctx))),
+  const [mkissa, reanime, anikoto, animegg, anineko, anidbapp, dhive, animenosub, anizone, anibd, senshi, kaa, animedunya] = await Promise.all([
+    safe("mkissa",     () => withCache(`epv:mkissa:${anilistId}`,     status, () => mkissaEpisodes(anilistId, ctx))),
     safe("reanime",    () => withCache(`epv:reanime:${anilistId}`,    status, () => reanimeEpisodes(anilistId, ctx))),
     safe("anikoto",    () => withCache(`epv:anikoto:${anilistId}`,    status, () => anikotoEpisodes(anilistId, ctx))),
     safe("animegg",    () => withCache(`epv:animegg:${anilistId}`,    status, () => animeggEpisodes(anilistId, ctx))),
@@ -254,7 +254,7 @@ export async function buildEpisodesWithCache(anilistId, media, anizip) {
   ]);
 
   return {
-    allmanga:    manga.ok       ? manga.data       : { error: manga.error,       stack: manga.stack },
+    mkissa:      mkissa.ok      ? mkissa.data      : { error: mkissa.error,      stack: mkissa.stack },
     reanime:     reanime.ok     ? reanime.data     : { error: reanime.error,     stack: reanime.stack },
     anikoto:     anikoto.ok     ? anikoto.data     : { error: anikoto.error,     stack: anikoto.stack },
     animegg:     animegg.ok     ? animegg.data     : { error: animegg.error,     stack: animegg.stack },
