@@ -2,24 +2,25 @@ import crypto from "node:crypto";
 
 const __name = (fn, _) => fn;
 
-const UA4 = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0";
+const UA4 = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36";
 const REFERER = "https://mkissa.to";
 const API = "https://api.mkissa.net";
 const API_URL = `${API}/api`;
 const CDN_ROOT = "https://cdn.mkissa.net/all/mk";
 const DISCOVERY_PATH = "/anime/attack-on-titan-Ycid9tDZd2FxGCJ8o/sub/1";
 const ANIZIP = "https://api.ani.zip/mappings";
-const DEFAULT_BUILD_ID = "99";
 const CONTENT_LANE = "k7";
 const REFERER_HOST = "mkissa.to";
 const KEY_GROUP = "mkissa";
 const BOOT_EPOCH_MS = 604800000;
 const BOOT_GRACE_MS = 86400000;
 const AA_REQ_MS = 300000;
-const DEFAULT_MASK_PARTS = ["gs68iqM0RRE=", "3SRW/KDgIiU=", "DXJpkOW4Spo=", "sb7nU0nqIqc="];
+const WATCH_MEMORY_TTL = 3 * 60 * 60 * 1000;
 const EPISODE_QUERY_HASH = "b0a4efecd8df8fce709468d54aaa716b712c93b5b7e351888ddc242898abc38e";
 const DISCOVERY_CONCURRENCY = 16;
 const DISCOVERY_LIMIT = 600;
+const FETCH_TIMEOUT_MS = 10000;
+const EXTRACT_TIMEOUT_MS = 5000;
 const TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJlYjdkMWM0ZTgwMGUzM2FiMmE3Y2I3NDA5YmM4NjQ2YSIsIm5iZiI6MTc3OTUzMDcxOS40MzIsInN1YiI6IjZhMTE3YmRmYTlhNjNlYmFiOWUzYjc4YyIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.Z9pa96oJEyicf6wAoaKGKJd9ldapeiOdktoJd4xcgLo";
 
 const HEX_TABLE = {
@@ -38,6 +39,8 @@ const HEX_TABLE = {
 
 let cryptoConfigCache = null;
 let bootstrapCache = null;
+const sessionCookies = new Map();
+const watchMemoryCache = new Map();
 
 function decodeHexUrl(hex) {
   let out = "";
@@ -64,6 +67,48 @@ function sleep(ms) {
 }
 __name(sleep, "sleep");
 
+function storeCookies(headers) {
+  const raw = typeof headers.getSetCookie === "function" ? headers.getSetCookie() : [headers.get("set-cookie")].filter(Boolean);
+  for (const value of raw) {
+    for (const part of String(value).split(/,(?=[^;,]+=)/)) {
+      const pair = part.split(";")[0]?.trim();
+      const index = pair?.indexOf("=");
+      if (index > 0) sessionCookies.set(pair.slice(0, index), pair.slice(index + 1));
+    }
+  }
+}
+__name(storeCookies, "storeCookies");
+
+function cookieHeader() {
+  return [...sessionCookies].map(([key, value]) => `${key}=${value}`).join("; ");
+}
+__name(cookieHeader, "cookieHeader");
+
+function browserHeaders(headers = {}) {
+  const cookie = cookieHeader();
+  return {
+    "User-Agent": UA4,
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "sec-ch-ua": "\"Not=A?Brand\";v=\"99\", \"Google Chrome\";v=\"151\", \"Chromium\";v=\"151\"",
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": "\"Windows\"",
+    ...(cookie ? { Cookie: cookie } : {}),
+    ...headers
+  };
+}
+__name(browserHeaders, "browserHeaders");
+
+async function sessionFetch(url, options = {}) {
+  const res = await fetch(url, {
+    ...options,
+    headers: browserHeaders(options.headers || {})
+  });
+  storeCookies(res.headers);
+  return res;
+}
+__name(sessionFetch, "sessionFetch");
+
 function absoluteAssetUrl(value, base = CDN_ROOT) {
   return new URL(value, base.endsWith("/") ? base : `${base}/`).toString();
 }
@@ -86,8 +131,17 @@ function findBalancedBlock(text, start) {
 }
 __name(findBalancedBlock, "findBalancedBlock");
 
-function evalCryptoChunk(chunk) {
-  const cryptoStart = chunk.search(/const\s+[A-Za-z_$][\w$]*\s*=[^;]{0,160}\?"\d+":"",\s*[A-Za-z_$][\w$]*=\[/);
+function normalizeCryptoConfig(out) {
+  if (!out?.buildId || !Array.isArray(out.maskParts) || out.maskParts.length < 4) return null;
+  return {
+    buildId: String(out.buildId),
+    maskParts: out.maskParts.slice(0, 4).map(String)
+  };
+}
+__name(normalizeCryptoConfig, "normalizeCryptoConfig");
+
+function evalOldCryptoChunk(chunk) {
+  const cryptoStart = chunk.search(/const\s+[A-Za-z_$][\w$]*\s*=[^;]{0,180}\?"\d+":"",\s*[A-Za-z_$][\w$]*=\[/);
   if (cryptoStart < 0) return null;
   const tableMatches = [...chunk.slice(0, cryptoStart).matchAll(/function\s+([A-Za-z_$][\w$]*)\s*\(\)\{const e=\[/g)];
   const tableStart = tableMatches.at(-1)?.index ?? -1;
@@ -102,39 +156,82 @@ function evalCryptoChunk(chunk) {
   code = code.replace(new RegExp(`const\\s+${buildName}=`), `var ${buildName}=`);
   code = code.replace(new RegExp(`,\\s*${maskName}=\\[`), `;var ${maskName}=[`);
   code += `\nreturn { buildId: ${buildName}, maskParts: ${maskName} };`;
-  const out = Function(code)();
-  if (!out?.buildId || !Array.isArray(out.maskParts) || out.maskParts.length < 4) return null;
-  return {
-    buildId: String(out.buildId),
-    maskParts: out.maskParts.slice(0, 4).map(String)
-  };
+  return normalizeCryptoConfig(Function(code)());
+}
+__name(evalOldCryptoChunk, "evalOldCryptoChunk");
+
+function evalModernCryptoChunk(chunk) {
+  const cryptoStart = chunk.search(/const\s+[A-Za-z_$][\w$]*\s*=[^;]{0,220}\?"\d+":"",\s*[A-Za-z_$][\w$]*=\[/);
+  if (cryptoStart < 0) return null;
+  const wrapperMatch = [...chunk.slice(0, cryptoStart).matchAll(/const\s+[A-Za-z_$][\w$]*=\(function\(\)\{/g)].at(-1);
+  const wrapperStart = wrapperMatch?.index ?? -1;
+  const tableMatch = [...chunk.slice(0, wrapperStart).matchAll(/function\s+[A-Za-z_$][\w$]*\s*\(\)\{const\s+[A-Za-z_$][\w$]*=\[/g)].at(-1);
+  const tableStart = tableMatch?.index ?? -1;
+  const decoderMatch = [...chunk.slice(0, tableStart).matchAll(/function\s+[A-Za-z_$][\w$]*\s*\([A-Za-z_$][\w$]*(?:,[A-Za-z_$][\w$]*)?\)\{return\s+[A-Za-z_$][\w$]*=[A-Za-z_$][\w$]*-\d+,[A-Za-z_$][\w$]*\(\)\[[A-Za-z_$][\w$]*\]\}/g)].at(-1);
+  const tiStart = decoderMatch?.index ?? -1;
+  const asyncStart = chunk.indexOf("async function", cryptoStart);
+  if (tiStart < 0 || wrapperStart < 0 || asyncStart < 0) return null;
+  const head = chunk.slice(tiStart, wrapperStart);
+  let body = chunk.slice(cryptoStart, asyncStart);
+  const buildMatch = body.match(/const\s+([A-Za-z_$][\w$]*)=/);
+  const maskMatch = body.match(/,([A-Za-z_$][\w$]*)=\[/);
+  const maskFunction = body.match(/function\s+([A-Za-z_$][\w$]*)\s*\([^)]*=\s*([A-Za-z_$][\w$]*)\)/);
+  if (!buildMatch || !maskMatch || !maskFunction) return null;
+  const buildName = buildMatch[1];
+  const maskName = maskMatch[1];
+  const maskFunctionName = maskFunction[1];
+  body = body.replace(new RegExp(`const\\s+${buildName}=`), `var ${buildName}=`);
+  body = body.replace(new RegExp(`,${maskName}=\\[`), `;var ${maskName}=[`);
+  body += `\nreturn { buildId: ${buildName}, maskParts: ${maskName}, mask: Array.from(${maskFunctionName}(${buildName}) || []) };`;
+  return normalizeCryptoConfig(Function(head + body)());
+}
+__name(evalModernCryptoChunk, "evalModernCryptoChunk");
+
+function evalCryptoChunk(chunk) {
+  try {
+    return evalModernCryptoChunk(chunk);
+  } catch {}
+  try {
+    return evalOldCryptoChunk(chunk);
+  } catch {}
+  return null;
 }
 __name(evalCryptoChunk, "evalCryptoChunk");
 
 async function fetchText(url, headers = {}) {
-  const res = await fetch(url, {
-    headers: {
-      "User-Agent": UA4,
-      "Referer": `${REFERER}/`,
-      ...headers
-    }
-  });
-  if (!res.ok) throw new Error(`Fetch ${res.status}: ${url}`);
-  return res.text();
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const res = await sessionFetch(url, {
+      signal: ac.signal,
+      headers: {
+        "Referer": `${REFERER}/`,
+        ...headers
+      }
+    });
+    if (!res.ok) throw new Error(`Fetch ${res.status}: ${url}`);
+    return res.text();
+  } finally {
+    clearTimeout(timer);
+  }
 }
 __name(fetchText, "fetchText");
 
+async function fetchWithTimeout(url, options = {}, timeout = EXTRACT_TIMEOUT_MS) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeout);
+  try {
+    const res = await fetch(url, { ...options, signal: options.signal || ac.signal });
+    storeCookies(res.headers);
+    return res;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+__name(fetchWithTimeout, "fetchWithTimeout");
+
 async function discoverCryptoConfig(force = false) {
   if (!force && cryptoConfigCache?.expiresAt && Date.now() < cryptoConfigCache.expiresAt) return cryptoConfigCache;
-  const fallback = {
-    buildId: DEFAULT_BUILD_ID,
-    maskParts: DEFAULT_MASK_PARTS,
-    expiresAt: Date.now() + 1800000
-  };
-  if (!force && await isValidCryptoConfig(fallback).catch(() => false)) {
-    cryptoConfigCache = fallback;
-    return cryptoConfigCache;
-  }
   try {
     const html = await fetchText(`${REFERER}${DISCOVERY_PATH}`, { Accept: "text/html,*/*" });
     const appUrl = html.match(/import\("([^"]+\/_app\/immutable\/entry\/app\.[^"]+\.js)"\)/)?.[1] || html.match(/src="([^"]+\/_app\/immutable\/entry\/app\.[^"]+\.js)"/)?.[1];
@@ -166,16 +263,17 @@ async function discoverCryptoConfig(force = false) {
         }
         if (!/client-crypto|x-aa-boot|aaReq|partB/.test(item.text)) continue;
         const config = evalCryptoChunk(item.text);
-        if (config && await isValidCryptoConfig(config).catch(() => false)) {
+        const valid = config ? await isValidCryptoConfig(config).catch((error) => error?.name === "AbortError" ? null : false) : false;
+        if (config && valid !== false) {
           cryptoConfigCache = { ...config, expiresAt: Date.now() + 1800000 };
           return cryptoConfigCache;
         }
       }
     }
     throw new Error("MKissa crypto chunk not found");
-  } catch {
-    cryptoConfigCache = fallback;
-    return cryptoConfigCache;
+  } catch (error) {
+    cryptoConfigCache = null;
+    throw error;
   }
 }
 __name(discoverCryptoConfig, "discoverCryptoConfig");
@@ -220,16 +318,22 @@ __name(makeBootToken, "makeBootToken");
 
 async function isValidCryptoConfig(config, lane = CONTENT_LANE) {
   for (const epoch of currentEpochs()) {
-    const res = await fetch(`${API}/client-crypto/v1/bootstrap?buildId=${encodeURIComponent(config.buildId)}&k=${encodeURIComponent(lane)}`, {
-      headers: {
-        "User-Agent": UA4,
-        "Referer": `${REFERER}/`,
-        "Origin": REFERER,
-        "x-build-id": config.buildId,
-        "x-aa-boot": makeBootToken(config, epoch, lane)
-      }
-    });
-    if (res.ok) return true;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
+    try {
+      const res = await sessionFetch(`${API}/client-crypto/v1/bootstrap?buildId=${encodeURIComponent(config.buildId)}&k=${encodeURIComponent(lane)}`, {
+        signal: ac.signal,
+        headers: {
+          "Referer": `${REFERER}/`,
+          "Origin": REFERER,
+          "x-build-id": config.buildId,
+          "x-aa-boot": makeBootToken(config, epoch, lane)
+        }
+      });
+      if (res.ok) return true;
+    } finally {
+      clearTimeout(timer);
+    }
   }
   return false;
 }
@@ -242,9 +346,8 @@ async function fetchBootstrap(lane = CONTENT_LANE, force = false) {
   }
   let lastError = null;
   for (const epoch of currentEpochs()) {
-    const res = await fetch(`${API}/client-crypto/v1/bootstrap?buildId=${encodeURIComponent(config.buildId)}&k=${encodeURIComponent(lane)}`, {
+    const res = await sessionFetch(`${API}/client-crypto/v1/bootstrap?buildId=${encodeURIComponent(config.buildId)}&k=${encodeURIComponent(lane)}`, {
       headers: {
-        "User-Agent": UA4,
         "Referer": `${REFERER}/`,
         "Origin": REFERER,
         "x-build-id": config.buildId,
@@ -459,14 +562,16 @@ __name(episodeQuery, "episodeQuery");
 async function apiPost(query, variables, options = {}) {
   const config = options.buildId ? options : await discoverCryptoConfig();
   const body = options.extensions ? { query, variables, extensions: options.extensions } : { query, variables };
-  const res = await fetch(API_URL, {
+  const res = await sessionFetch(API_URL, {
     method: "POST",
     headers: {
-      "User-Agent": UA4,
       "Referer": `${REFERER}/`,
       "Origin": REFERER,
       "Content-Type": "application/json",
-      "x-build-id": config.buildId
+      "x-build-id": config.buildId,
+      "Sec-Fetch-Dest": "empty",
+      "Sec-Fetch-Mode": "cors",
+      "Sec-Fetch-Site": "same-site"
     },
     body: JSON.stringify(body)
   });
@@ -490,8 +595,9 @@ async function apiPost(query, variables, options = {}) {
 __name(apiPost, "apiPost");
 
 async function apiEpisode(query, variables, options = {}) {
-  const { force = false, captchaRetry = 0, captcha = null } = options;
-  const hash = EPISODE_QUERY_HASH || sha256Hex(query);
+  const { force = false, captchaRetry = 0, captcha = null, hashIndex = 0, postFallback = false } = options;
+  const hashes = [...new Set([EPISODE_QUERY_HASH, sha256Hex(query)].filter(Boolean))];
+  const hash = hashes[Math.min(hashIndex, hashes.length - 1)];
   const { key, epoch, buildId } = await getLaneKey(CONTENT_LANE, force);
   const extensions = {
     persistedQuery: { version: 1, sha256Hash: hash },
@@ -504,12 +610,14 @@ async function apiEpisode(query, variables, options = {}) {
     return posted?.tobeparsed ? decryptTobeparsed(posted.tobeparsed, key) : posted;
   }
   const url = `${API_URL}?variables=${encodeURIComponent(JSON.stringify(variables))}&extensions=${encodeURIComponent(JSON.stringify(extensions))}`;
-  const res = await fetch(url, {
+  const res = await sessionFetch(url, {
     headers: {
-      "User-Agent": UA4,
       "Referer": `${REFERER}/`,
       "Origin": REFERER,
-      "x-build-id": buildId
+      "x-build-id": buildId,
+      "Sec-Fetch-Dest": "empty",
+      "Sec-Fetch-Mode": "cors",
+      "Sec-Fetch-Site": "same-site"
     }
   });
   const raw = await res.text();
@@ -521,6 +629,9 @@ async function apiEpisode(query, variables, options = {}) {
   const json = JSON.parse(raw);
   const messages = json.errors?.map((e) => e.message || e.extensions?.code).filter(Boolean) || [];
   if (messages.includes("PersistedQueryNotFound") || messages.some((m) => /Context creation failed/i.test(m))) {
+    if (hashIndex + 1 < hashes.length) {
+      return apiEpisode(query, variables, { force: true, captchaRetry, captcha, hashIndex: hashIndex + 1, postFallback });
+    }
     if (hash === EPISODE_QUERY_HASH) {
       const err = new Error(messages.join(" · "));
       err.rawBody = raw;
@@ -530,9 +641,23 @@ async function apiEpisode(query, variables, options = {}) {
     return posted?.tobeparsed ? decryptTobeparsed(posted.tobeparsed, key) : posted;
   }
   if (messages.includes("NEED_CAPTCHA")) {
-    if (captchaRetry < 2) {
-      await sleep(3500 + captchaRetry * 3500);
-      return apiEpisode(query, variables, { force: true, captchaRetry: captchaRetry + 1 });
+    if (!postFallback) {
+      try {
+        const postHash = sha256Hex(query);
+        const postExtensions = {
+          persistedQuery: { version: 1, sha256Hash: postHash },
+          k: CONTENT_LANE,
+          aaReq: makeAaReq(key, epoch, buildId, postHash, CONTENT_LANE)
+        };
+        const posted = await apiPost(query, variables, { buildId, extensions: postExtensions });
+        return posted?.tobeparsed ? decryptTobeparsed(posted.tobeparsed, key) : posted;
+      } catch (err) {
+        if (err.code !== "NEED_CAPTCHA") throw err;
+      }
+    }
+    if (captchaRetry < 5) {
+      await sleep(1500 + captchaRetry * 1200);
+      return apiEpisode(query, variables, { force: true, captchaRetry: captchaRetry + 1, hashIndex, postFallback: true });
     }
     const err = new Error("MKissa requested captcha");
     err.code = "NEED_CAPTCHA";
@@ -540,7 +665,7 @@ async function apiEpisode(query, variables, options = {}) {
     throw err;
   }
   if (messages.some((m) => /^AA_CRYPTO_/.test(m))) {
-    if (!force) return apiEpisode(query, variables, { force: true, captchaRetry, captcha });
+    if (!force) return apiEpisode(query, variables, { force: true, captchaRetry, captcha, hashIndex, postFallback });
     const err = new Error(messages.join(" · "));
     err.rawBody = raw;
     throw err;
@@ -558,7 +683,7 @@ async function apiEpisode(query, variables, options = {}) {
 __name(apiEpisode, "apiEpisode");
 
 async function searchMkissa(query, mode = "sub") {
-  const gql = `query($search:SearchInput $limit:Int $page:Int $translationType:VaildTranslationTypeEnumType $countryOrigin:VaildCountryOriginEnumType){shows(search:$search limit:$limit page:$page translationType:$translationType countryOrigin:$countryOrigin){edges{_id name englishName nativeName availableEpisodes availableEpisodesDetail aniListId __typename}}}`;
+  const gql = `query($search:SearchInput $limit:Int $page:Int $translationType:VaildTranslationTypeEnumType $countryOrigin:VaildCountryOriginEnumType){shows(search:$search limit:$limit page:$page translationType:$translationType countryOrigin:$countryOrigin){edges{_id name englishName nativeName slugTime availableEpisodes availableEpisodesDetail aniListId __typename}}}`;
   const data = await apiPost(gql, {
     search: { allowAdult: false, allowUnknown: false, query },
     limit: 40,
@@ -575,6 +700,31 @@ async function getEpisodeSources(showId, epNum, audio = "sub", captcha = null) {
   return data?.episode ?? null;
 }
 __name(getEpisodeSources, "getEpisodeSources");
+
+function slugifyTitle(value) {
+  return String(value || "").normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+__name(slugifyTitle, "slugifyTitle");
+
+async function warmWatchPage(showId, show, epNum, audio) {
+  const slug = show?.slugTime || slugifyTitle(show?.englishName || show?.name || show?.nativeName);
+  if (!slug || !showId) return;
+  const page = `${REFERER}/anime/${slug}-${showId}/${audio}/${epNum}`;
+  try {
+    await fetchWithTimeout(page, {
+      headers: browserHeaders({
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Referer": `${REFERER}/`,
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1"
+      })
+    }, FETCH_TIMEOUT_MS);
+  } catch {}
+}
+__name(warmWatchPage, "warmWatchPage");
 
 async function fetchAniZip(anilistId) {
   const res = await fetch(`${ANIZIP}?anilist_id=${anilistId}`);
@@ -711,7 +861,7 @@ __name(aesDecrypt, "aesDecrypt");
 
 async function extractMp4(id) {
   try {
-    const r = await fetch(`https://www.mp4upload.com/embed-${id}.html`, {
+    const r = await fetchWithTimeout(`https://www.mp4upload.com/embed-${id}.html`, {
       headers: { "User-Agent": UA4, Referer: "https://mp4upload.com/" }
     });
     if (!r.ok) return null;
@@ -730,7 +880,7 @@ async function extractUns(url) {
     const id = parsed.hash.replace(/^#/, "").split("&")[0];
     if (!id) return null;
     const base = `${parsed.protocol}//${parsed.host}`;
-    const r = await fetch(`${base}/api/v1/video?id=${encodeURIComponent(id)}&w=1280&h=720&r=`, {
+    const r = await fetchWithTimeout(`${base}/api/v1/video?id=${encodeURIComponent(id)}&w=1280&h=720&r=`, {
       headers: { "User-Agent": UA4, Referer: `${base}/#${id}`, Origin: base }
     });
     if (!r.ok) return null;
@@ -746,7 +896,7 @@ __name(extractUns, "extractUns");
 
 async function extractOk(id) {
   try {
-    const r = await fetch(`https://ok.ru/videoembed/${id}`, {
+    const r = await fetchWithTimeout(`https://ok.ru/videoembed/${id}`, {
       headers: { "User-Agent": UA4, Referer: "https://ok.ru/" }
     });
     if (!r.ok) return null;
@@ -768,12 +918,12 @@ async function extractStreamSB(id) {
       "Accept": "application/json, text/plain, */*",
       "Accept-Language": "en-US,en;q=0.9"
     };
-    const r1 = await fetch(`https://streamsb.net/api/v1/video?id=${id}`, { headers: baseHeaders });
+    const r1 = await fetchWithTimeout(`https://streamsb.net/api/v1/video?id=${id}`, { headers: baseHeaders });
     const sid = (r1.headers.get("set-cookie") || "").match(/sid=([^;]+)/)?.[1] ?? "";
     const html = await r1.text();
     const m = html.match(/window\.location\.replace\('([^']+)'\)/);
     if (!m) return null;
-    const r2 = await fetch(m[1], { headers: { ...baseHeaders, Cookie: `sid=${sid}`, Referer: `https://streamsb.net/e/${id}.html` } });
+    const r2 = await fetchWithTimeout(m[1], { headers: { ...baseHeaders, Cookie: `sid=${sid}`, Referer: `https://streamsb.net/e/${id}.html` } });
     if (!r2.ok) return null;
     const ct = r2.headers.get("content-type") ?? "";
     if (!ct.includes("json")) return null;
@@ -787,7 +937,7 @@ __name(extractStreamSB, "extractStreamSB");
 
 async function extractStreamlare(id) {
   try {
-    const r = await fetch("https://streamlare.com/api/video/stream/get", {
+    const r = await fetchWithTimeout("https://streamlare.com/api/video/stream/get", {
       method: "POST",
       headers: { "Content-Type": "application/json", "User-Agent": UA4, "Referer": "https://streamlare.com/", "Origin": "https://streamlare.com", "Accept": "application/json, */*" },
       body: JSON.stringify({ id })
@@ -805,7 +955,7 @@ async function extractClock(url) {
   try {
     const parsed = new URL(url);
     const clockUrl = parsed.pathname.includes("/clock.json") ? url : url.replace("/clock", "/clock.json");
-    const r = await fetch(clockUrl, {
+    const r = await fetchWithTimeout(clockUrl, {
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
         "Referer": "https://allanime.day/player.html",
@@ -1064,14 +1214,97 @@ function readCaptcha(request, url) {
 }
 __name(readCaptcha, "readCaptcha");
 
+function html(body, status = 200) {
+  return new Response(body, {
+    status,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Access-Control-Allow-Origin": "*",
+      "Cache-Control": "no-store"
+    }
+  });
+}
+__name(html, "html");
+
+function handleCaptchaPage(url) {
+  const next = url.searchParams.get("next") || "";
+  const safeNext = next.startsWith("/watch/mkissa/") ? next : "";
+  const endpoint = `${API.replace(/\/$/, "")}/captcha/turnstile`;
+  return html(`<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MKissa Security Check</title>
+<style>
+body{margin:0;font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#101114;color:#f5f5f5;display:grid;place-items:center;min-height:100vh}
+main{width:min(720px,calc(100vw - 32px))}
+h1{font-size:20px;font-weight:650;margin:0 0 14px}
+#captcha-root{min-height:160px}
+iframe{width:100%;min-height:180px;border:0;border-radius:8px;background:white}
+pre{white-space:pre-wrap;word-break:break-word;background:#17191f;border:1px solid #2a2d36;border-radius:8px;padding:14px;max-height:48vh;overflow:auto}
+button{border:0;border-radius:6px;padding:10px 14px;background:#f5f5f5;color:#111;font-weight:650;cursor:pointer}
+</style>
+</head>
+<body>
+<main>
+<h1>MKissa Security Check</h1>
+<div id="captcha-root"></div>
+<pre id="out">Waiting for captcha...</pre>
+</main>
+<script>
+const next=${JSON.stringify(safeNext)};
+const endpoint=${JSON.stringify(endpoint)};
+const out=document.getElementById("out");
+const root=document.getElementById("captcha-root");
+function show(value){out.textContent=typeof value==="string"?value:JSON.stringify(value,null,2)}
+function run(token,provider){
+  if(!next){show({error:"Missing next watch path"});return}
+  const u=new URL(next,location.origin);
+  u.searchParams.set("captchaToken",token);
+  u.searchParams.set("captchaProvider",provider||"turnstile");
+  show("Captcha solved. Retrying watch request...");
+  fetch(u).then(r=>r.text().then(t=>{try{show(JSON.parse(t))}catch{show(t)}})).catch(e=>show({error:String(e)}));
+}
+window.addEventListener("message",event=>{
+  if(event.origin!==new URL(endpoint).origin)return;
+  const data=event.data;
+  if(!data||data.type!=="sitea-captcha-ready")return;
+  if(data.error){show({error:data.error});return}
+  if(!data.token){show({error:"Captcha token missing"});return}
+  run(data.token,data.provider);
+});
+const iframe=document.createElement("iframe");
+iframe.src=endpoint;
+iframe.title="Security check";
+iframe.loading="eager";
+iframe.referrerPolicy="strict-origin-when-cross-origin";
+iframe.onerror=()=>show({error:"Failed to load captcha frame"});
+root.appendChild(iframe);
+</script>
+</body>
+</html>`);
+}
+__name(handleCaptchaPage, "handleCaptchaPage");
+
 async function handleWatch(anilistId, audio, epNum, captcha = null) {
-  const { showId, anizip } = await resolveMkissaId(anilistId);
-  const episode = await getEpisodeSources(showId, epNum, audio, captcha);
+  const cacheKey = `${anilistId}:${audio}:${epNum}`;
+  const cached = watchMemoryCache.get(cacheKey);
+  if (cached && Date.now() < cached.expiresAt && !captcha) return cached.data;
+  const { showId, show, anizip } = await resolveMkissaId(anilistId);
+  if (!captcha) await warmWatchPage(showId, show, epNum, audio);
+  let episode;
+  try {
+    episode = await getEpisodeSources(showId, epNum, audio, captcha);
+  } catch (err) {
+    if (err.code === "NEED_CAPTCHA" && cached?.data) return cached.data;
+    throw err;
+  }
   if (!episode) throw new Error("Episode not found");
   const sources = await Promise.all((episode.sourceUrls || []).map(extractSource));
   sources.sort((a, b) => b.priority - a.priority);
   const epMeta = anizip?.episodes?.[String(epNum)] ?? {};
-  return {
+  const data = {
     anilistId: Number(anilistId),
     mkissaId: showId,
     episode: Number(epNum),
@@ -1080,6 +1313,8 @@ async function handleWatch(anilistId, audio, epNum, captcha = null) {
     outro: epMeta.outro ?? null,
     sources
   };
+  watchMemoryCache.set(cacheKey, { data, expiresAt: Date.now() + WATCH_MEMORY_TTL });
+  return data;
 }
 __name(handleWatch, "handleWatch");
 
@@ -1102,6 +1337,8 @@ function matchRoute(pathname) {
   if (m) return { handler: "watch", anilistId: m[1], audio: m[2], ep: m[3] };
   m = pathname.match(/^\/map\/(\d+)\/?$/);
   if (m) return { handler: "map", anilistId: m[1] };
+  m = pathname.match(/^\/captcha\/mkissa\/?$/);
+  if (m) return { handler: "captcha" };
   return null;
 }
 __name(matchRoute, "matchRoute");
@@ -1125,17 +1362,20 @@ const mkissaDefault = {
         routes: [
           "GET /episodes/:anilistId",
           "GET /watch/mkissa/:anilistId/:audio/mkissa-:ep",
+          "GET /captcha/mkissa?next=/watch/mkissa/:anilistId/:audio/mkissa-:ep",
           "GET /map/:anilistId"
         ]
       }, 404);
     }
     try {
+      if (route.handler === "captcha") return handleCaptchaPage(url);
       if (route.handler === "map") return json(await handleMap(route.anilistId));
       if (route.handler === "episodes") return json(await handleEpisodesRoute(route.anilistId));
       if (route.handler === "watch") return json(await handleWatch(route.anilistId, route.audio, route.ep, readCaptcha(request, url)));
     } catch (err) {
       const status = err.code === "NEED_CAPTCHA" ? 403 : 500;
-      return json({ error: err.message, code: err.code ?? null, captcha: err.code === "NEED_CAPTCHA" ? { endpoint: `${API.replace(/\/$/, "")}/captcha/turnstile`, provider: "turnstile1", tokenQuery: "captchaToken", tokenHeader: "x-captcha-token" } : null, "Raw-ERROR": err.rawBody ?? null, stack: err.stack }, status);
+      const solveUrl = route.handler === "watch" ? `/captcha/mkissa?next=${encodeURIComponent(url.pathname)}` : null;
+      return json({ error: err.message, code: err.code ?? null, captcha: err.code === "NEED_CAPTCHA" ? { endpoint: `${API.replace(/\/$/, "")}/captcha/turnstile`, provider: "turnstile", tokenQuery: "captchaToken", tokenHeader: "x-captcha-token", solveUrl } : null, "Raw-ERROR": err.rawBody ?? null, stack: err.stack }, status);
     }
   }
 };
