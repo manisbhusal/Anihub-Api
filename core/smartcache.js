@@ -1,4 +1,24 @@
-export const _CACHE_ENABLED = false; //change it to true and setup your upstash so you can cache your data
+// Reads process.env safely — process may be undefined/limited on edge runtimes.
+function readEnv(name) {
+  try {
+    return typeof process !== "undefined" ? process.env?.[name] : undefined;
+  } catch { return undefined; }
+}
+
+function envBool(name, fallback) {
+  const raw = readEnv(name);
+  if (raw === undefined || raw === "") return fallback;
+  return ["true", "1", "yes", "on"].includes(String(raw).toLowerCase());
+}
+
+function envInt(name, fallback) {
+  const raw = readEnv(name);
+  const n = Number(raw);
+  return raw !== undefined && raw !== "" && Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+// change CACHE_ENABLED=true in .env and set your upstash credentials to enable caching
+export const _CACHE_ENABLED = envBool("CACHE_ENABLED", false);
 
 const IS_LOCAL_NODE = (() => {
   try {
@@ -10,9 +30,13 @@ const IS_LOCAL_NODE = (() => {
   } catch { return false; }
 })();
 
-const UPSTASH_REDIS_REST_URL = "YOUR_UPSTASH_REDIS_REST_URL"; //get it from upstash.com 
-const UPSTASH_REDIS_REST_TOKEN = "YOUR_UPSTASH_REDIS_REST_TOKEN";
+const UPSTASH_REDIS_REST_URL = readEnv("UPSTASH_REDIS_REST_URL") ?? ""; //get it from upstash.com
+const UPSTASH_REDIS_REST_TOKEN = readEnv("UPSTASH_REDIS_REST_TOKEN") ?? "";
 const REDIS_ENABLED = Boolean(UPSTASH_REDIS_REST_URL && UPSTASH_REDIS_REST_TOKEN);
+
+// REDIS_TTL is in seconds (default 900s / 15min) — used as the fallback expiry
+// for Redis writes that don't carry their own computed ttl (see redisWrite below).
+const REDIS_TTL_MS = envInt("REDIS_TTL", 900) * 1000;
 
 function encodeEntry(entry) {
   return JSON.stringify(entry, (_, value) => value === Infinity ? "__Infinity__" : value);
@@ -40,11 +64,8 @@ async function redisCommand(command) {
 async function redisWrite(key, entry) {
   if (!REDIS_ENABLED) return;
   const value = encodeEntry(entry);
-  if (Number.isFinite(entry.ttl) && entry.ttl > 0) {
-    await redisCommand(["SET", key, value, "PX", Math.ceil(entry.ttl)]);
-    return;
-  }
-  await redisCommand(["SET", key, value]);
+  const ttlMs = Number.isFinite(entry.ttl) && entry.ttl > 0 ? entry.ttl : REDIS_TTL_MS;
+  await redisCommand(["SET", key, value, "PX", Math.ceil(ttlMs)]);
 }
 
 let diskRead  = () => null;
