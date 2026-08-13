@@ -138,6 +138,10 @@ export default {
       );
     }
 
+    if (path.match(/^\/captcha\/mkissa\/?$/)) {
+      return mkissaHandler.fetch(request);
+    }
+
     m = path.match(/^\/watch\/reanime\/(\d+)\/(sub|dub)\/reanime-(\d+)\/?$/);
     if (m) {
       const [, id, audio, ep] = m;
