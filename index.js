@@ -263,7 +263,7 @@ export default {
     if (m) return dhiveHandler.fetch(request);
 
     return json({
-      name: "Anivexa API 2.1",
+      name: "Anivexa API 2.2.1",
       cache: _CACHE_ENABLED,
       providers: [
         "mkissa",

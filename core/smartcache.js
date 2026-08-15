@@ -34,9 +34,9 @@ const UPSTASH_REDIS_REST_URL = readEnv("UPSTASH_REDIS_REST_URL") ?? ""; //get it
 const UPSTASH_REDIS_REST_TOKEN = readEnv("UPSTASH_REDIS_REST_TOKEN") ?? "";
 const REDIS_ENABLED = Boolean(UPSTASH_REDIS_REST_URL && UPSTASH_REDIS_REST_TOKEN);
 
-// REDIS_TTL is in seconds (default 900s / 15min) — used as the fallback expiry
+// DEFAULT_REDIS_TTL is in seconds (default 900s / 15min) — used as the fallback expiry
 // for Redis writes that don't carry their own computed ttl (see redisWrite below).
-const REDIS_TTL_MS = envInt("REDIS_TTL", 900) * 1000;
+const REDIS_TTL_MS = envInt("DEFAULT_REDIS_TTL", 900) * 1000;
 
 function encodeEntry(entry) {
   return JSON.stringify(entry, (_, value) => value === Infinity ? "__Infinity__" : value);
