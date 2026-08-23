@@ -18,10 +18,11 @@ async function fetchPage(url) {
 
 function extractPlayerProps(html) {
   const idx = html.indexOf("prefetchedHls");
-  if (idx === -1) return null;
-  const propsIdx = html.lastIndexOf('props="', idx);
+  const propsIdx = idx === -1 ? html.indexOf('component-export="default"') : html.lastIndexOf('props="', idx);
   if (propsIdx === -1) return null;
-  const valueIdx = propsIdx + 7;
+  const attrIdx = html.indexOf('props="', propsIdx);
+  if (attrIdx === -1) return null;
+  const valueIdx = attrIdx + 7;
   const endIdx = html.indexOf('"', valueIdx);
   if (endIdx === -1) return null;
   const raw = html.slice(valueIdx, endIdx)
@@ -31,6 +32,18 @@ function extractPlayerProps(html) {
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">");
   try { return JSON.parse(raw); } catch { return null; }
+}
+
+function extractEpisodePlayerProps(html) {
+  const island = html.match(/<astro-island[^>]+component-url="[^"]*EpisodePlayer[^"]*"[^>]+props="([^"]+)"/);
+  if (!island) return null;
+  const raw = island[1]
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, "&")
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+  try { return decodeProps(JSON.parse(raw)); } catch { return null; }
 }
 
 function astroDecode(v) {
@@ -58,8 +71,25 @@ function parseEpisodeNums(html, malId) {
 async function fetchEpisodePage(malId, epNum) {
   const html = await fetchPage(`${BASE}/episode?anime=${malId}&ep_num=${epNum}`);
   const rawProps = extractPlayerProps(html);
-  if (!rawProps) throw new Error(`2dhive: no player props for mal ${malId} ep${epNum}`);
-  return decodeProps(rawProps);
+  const props = rawProps ? decodeProps(rawProps) : {};
+  const player = extractEpisodePlayerProps(html) ?? {};
+  const iframes = [...html.matchAll(/<iframe[^>]+src="([^"]+)"/g)].map((m) => m[1].replace(/&amp;/g, "&"));
+  const servers = [];
+  const add = (name, url, dub = false) => {
+    if (!url || servers.some((s) => s.slug === url && Boolean(s.dub) === dub)) return;
+    servers.push({ server_name: name, slug: url, dub });
+  };
+  for (const src of iframes) add(src.includes("babastream") ? "BabaStream" : src.includes("megaplay") ? "MegaPlay" : "Embed", src, src.endsWith("/dub"));
+  add("MegaPlay", `https://megaplay.buzz/stream/mal/${malId}/${epNum}/sub`, false);
+  add("BabaStream", `https://babastream.top/embed/${malId}/${epNum}/sub`, false);
+  add("MegaPlay", `https://megaplay.buzz/stream/mal/${malId}/${epNum}/dub`, true);
+  add("BabaStream", `https://babastream.top/embed/${malId}/${epNum}/dub`, true);
+  return {
+    ...props,
+    prefetchedHls: props.prefetchedHls ?? {},
+    servers: Array.isArray(props.servers) && props.servers.length ? props.servers : servers,
+    totalEpisodes: player.totalEpisodes ?? null
+  };
 }
 
 export async function getEpisodes(anilistId, ctx = {}) {
@@ -69,7 +99,7 @@ export async function getEpisodes(anilistId, ctx = {}) {
   if (!epNums.length) throw new Error(`2dhive: no episodes found for AniList ${anilistId} (MAL ${malId})`);
 
   const props = await fetchEpisodePage(malId, epNums[0]);
-  const hasDub = Boolean(props.prefetchedHls?.dub?.content);
+  const hasDub = Boolean(props.prefetchedHls?.dub?.content) || (Array.isArray(props.servers) && props.servers.some((s) => s.dub));
   const expected = expectedCount(ctx.media, ctx.anizip, ctx.jikanEps);
 
   const sub = [], dub = [];
@@ -105,14 +135,11 @@ export async function getEpisodes(anilistId, ctx = {}) {
 async function handleWatch(anilistId, audio, epNum) {
   const malId = await getMalId(anilistId);
   const referer = `${BASE}/episode?anime=${malId}&ep_num=${epNum}`;
-  const fileKey = `${malId}_${epNum}_${audio}`;
 
   const [propsResult, hiAnimeResult, dlContent] = await Promise.allSettled([
     fetchEpisodePage(malId, epNum),
     audio !== "dub"
-      ? fetch(`${BASE}/api/hianime?mal_id=${malId}&ep_num=${epNum}`, {
-          headers: { "User-Agent": UA, "Referer": referer },
-        }).then(r => r.ok ? r.json() : null).catch(() => null)
+      ? fetchHiAnimeHls(malId, epNum, referer)
       : Promise.resolve(null),
     fetchDownloadHls(malId, audio, epNum),
   ]);
@@ -133,6 +160,36 @@ async function handleWatch(anilistId, audio, epNum) {
     }
 
     const rawServers = Array.isArray(props.servers) ? props.servers : [];
+    for (const server of rawServers) {
+      if (Boolean(server.dub) !== (audio === "dub")) continue;
+      if (!server.slug) continue;
+      if (server.server_name === "HAdfree") continue;
+      streams.push({
+        server: server.server_name || "Embed",
+        url: server.slug,
+        type: "embed",
+      });
+    }
+
+    const babaStreams = rawServers.filter((server) =>
+      Boolean(server.dub) === (audio === "dub") &&
+      typeof server.slug === "string" &&
+      /babastream\.top\/embed\//i.test(server.slug)
+    );
+    const babaHls = await Promise.allSettled(babaStreams.map(async (server) => ({
+      embed: server.slug,
+      url: await fetchBabaStreamHls(server.slug),
+    })));
+    for (const result of babaHls) {
+      if (result.status !== "fulfilled" || !result.value.url) continue;
+      streams.push({
+        server: "BabaStream HLS",
+        url: result.value.url,
+        type: "hls",
+        embed: result.value.embed,
+      });
+    }
+
     const hadfreeEntries = rawServers.filter(s =>
       s.server_name === "HAdfree" && Boolean(s.dub) === (audio === "dub") && s.slug
     );
@@ -152,15 +209,17 @@ async function handleWatch(anilistId, audio, epNum) {
     }
   }
 
-  streams.push({
-    server: audio === "dub" ? "MegaPlay Dub" : "MegaPlay Sub",
-    url: `https://megaplay.buzz/stream/mal/${malId}/${epNum}/${audio === "dub" ? "dub" : "sub"}`,
-    type: "embed",
-  });
+  if (!streams.some((s) => s.url === `https://megaplay.buzz/stream/mal/${malId}/${epNum}/${audio === "dub" ? "dub" : "sub"}`)) {
+    streams.push({
+      server: audio === "dub" ? "MegaPlay Dub" : "MegaPlay Sub",
+      url: `https://megaplay.buzz/stream/mal/${malId}/${epNum}/${audio === "dub" ? "dub" : "sub"}`,
+      type: "embed",
+    });
+  }
 
   const hiAnime = hiAnimeResult.status === "fulfilled" ? hiAnimeResult.value : null;
   if (hiAnime?.m3u8) {
-    const entry = { server: "hiAnime", url: hiAnime.m3u8 };
+    const entry = { server: "hiAnime", url: hiAnime.m3u8, type: "hls" };
     if (hiAnime.subtitle) entry.subtitle = hiAnime.subtitle;
     streams.push(entry);
   }
@@ -172,7 +231,14 @@ async function handleWatch(anilistId, audio, epNum) {
     });
   }
 
-  return json({ anilistId: Number(anilistId), episode: Number(epNum), audio, streams });
+  const seen = new Set();
+  const cleanStreams = streams.filter((s) => {
+    const key = `${s.server}:${s.url}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return json({ anilistId: Number(anilistId), episode: Number(epNum), audio, streams: cleanStreams });
 }
 
 async function fetchDownloadHls(malId, audio, epNum) {
@@ -190,6 +256,34 @@ async function fetchDownloadHls(malId, audio, epNum) {
     if (!m) return null;
     const payload = JSON.parse(m[1]);
     return payload.hlsContent || null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchHiAnimeHls(malId, epNum, referer) {
+  try {
+    const res = await fetch(`${BASE}/api/hianime?mal_id=${malId}&ep_num=${epNum}`, {
+      headers: { "User-Agent": UA, "Referer": referer },
+    });
+    if (!res.ok) return null;
+    return res.json().catch(() => null);
+  } catch {
+    return null;
+  }
+}
+
+async function fetchBabaStreamHls(embedUrl) {
+  try {
+    const html = await fetch(embedUrl, {
+      headers: { "User-Agent": UA, "Referer": BASE },
+    }).then((res) => res.ok ? res.text() : null);
+    if (!html) return null;
+    const match = html.match(/\bvar\s+CFG\s*=\s*(\{[^;]+\})\s*;/);
+    if (!match) return null;
+    const config = JSON.parse(match[1]);
+    if (!config.primary || !config.mal || !config.ep || !config.sub) return null;
+    return `${config.primary.replace(/\/+$/, "")}/v2/${encodeURIComponent(config.mal)}/${encodeURIComponent(config.ep)}/${encodeURIComponent(config.sub)}/.m3u8?v=3`;
   } catch {
     return null;
   }
@@ -216,10 +310,29 @@ async function handleDownloadStream(anilistId, audio, epNum) {
 
 async function handleStream(anilistId, audio, epNum) {
   const malId = await getMalId(anilistId);
+  const referer = `${BASE}/episode?anime=${malId}&ep_num=${epNum}`;
   const props = await fetchEpisodePage(malId, epNum);
-  const content = audio === "dub"
+  let content = audio === "dub"
     ? props.prefetchedHls?.dub?.content
     : props.prefetchedHls?.sub?.content;
+
+  if (!content && audio !== "dub") {
+    const hiAnime = await fetchHiAnimeHls(malId, epNum, referer);
+    if (hiAnime?.m3u8) {
+      const res = await fetch(hiAnime.m3u8, { headers: { "User-Agent": UA, "Referer": BASE } }).catch(() => null);
+      if (res?.ok) content = await res.text();
+      else {
+        return new Response(null, {
+          status: 302,
+          headers: {
+            "Location": hiAnime.m3u8,
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "no-store",
+          },
+        });
+      }
+    }
+  }
 
   if (!content) {
     return new Response(JSON.stringify({ error: "No HLS stream found" }), {

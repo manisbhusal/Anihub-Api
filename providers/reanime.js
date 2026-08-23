@@ -608,10 +608,29 @@ async function resolveStream3(anilistId, audio, ep) {
   const audioTypes = audio === "sub" ? ["sub", "s-sub"] : ["dub", "s-dub"];
   const servers = byPrio(links.filter((s) => audioTypes.includes(s.dataType)));
   if (!servers.length) throw Object.assign(new Error(`No ${audio} servers for "${title2}" ep ${ep}`), { status: 404 });
-  const embedRes = await fetch(servers[0].dataLink, { headers: { ...H, Referer: `${BASE}/` } });
-  if (!embedRes.ok) throw Object.assign(new Error(`Embed fetch failed: ${embedRes.status}`), { status: 502 });
-  const stream = await decryptEmbed(await embedRes.text());
-  return { title: title2, slug, watchData, stream, server: servers[0].serverName, servers };
+  const seenServers = new Set();
+  const uniqueServers = servers.filter((s) => {
+    const key = `${s.serverName}:${s.dataType}:${s.dataLink}`;
+    if (seenServers.has(key)) return false;
+    seenServers.add(key);
+    return true;
+  });
+  const decrypted = await Promise.all(uniqueServers.map(async (server, index) => {
+    try {
+      const embedRes = await fetch(server.dataLink, { headers: { ...H, Referer: `${BASE}/` } });
+      if (!embedRes.ok) throw new Error(`Embed fetch failed: ${embedRes.status}`);
+      const stream = await decryptEmbed(await embedRes.text());
+      return { server, stream, index };
+    } catch (error) {
+      return { server, error: error.message, index };
+    }
+  }));
+  const streams = decrypted.filter((item) => item.stream?.url);
+  if (!streams.length) {
+    const error = decrypted.find((item) => item.error)?.error || "No decrypted streams";
+    throw Object.assign(new Error(error), { status: 502 });
+  }
+  return { title: title2, slug, watchData, stream: streams[0].stream, server: streams[0].server.serverName, servers: uniqueServers, streams, failedServers: decrypted.filter((item) => item.error) };
 }
 __name(resolveStream3, "resolveStream");
 async function handleWatch3(anilistId, audio, epNum, origin) {
@@ -624,8 +643,26 @@ async function handleWatch3(anilistId, audio, epNum, origin) {
   } catch (e) {
     return json3({ error: e.message, "Raw-ERROR": e.rawBody ?? null, stack: e.stack }, e.status ?? 500);
   }
-  const { title: title2, slug, watchData, stream, server, servers } = resolved;
-  const redirectUrl = `${origin}/stream/reanime/${anilistId}/${audio}/${ep}`;
+  const { title: title2, slug, watchData, stream, server, servers, streams, failedServers } = resolved;
+  const seenStreamUrls = new Set();
+  const cleanStreams = streams.map(({ server: source, stream: item, index }) => ({
+    server: source.serverName,
+    audio: source.dataType,
+    index,
+    url: item.url,
+    type: "hls",
+    embed: source.dataLink,
+    subtitles: item.subtitles ?? [],
+    thumbnails_vtt: item.thumbnails_vtt ?? null,
+    video_title: item.video_title ?? null,
+    intro: item.intro_chapter ?? null,
+    outro: item.outro_chapter ?? null
+  })).filter((item) => {
+    if (seenStreamUrls.has(item.url)) return false;
+    seenStreamUrls.add(item.url);
+    return true;
+  });
+  const embeds = servers.map((s) => ({ name: s.serverName, type: s.dataType, url: s.dataLink }));
   return json3({
     anime: title2,
     slug,
@@ -633,12 +670,7 @@ async function handleWatch3(anilistId, audio, epNum, origin) {
     audio,
     server,
     stream_url: stream.url,
-    redirect_url: redirectUrl,
-    streams: [
-      { url: stream.url, type: "hls" },
-      { url: redirectUrl, type: "hls-redirect" },
-      ...servers.map((s) => ({ url: s.dataLink, type: "embed", server: s.serverName }))
-    ],
+    streams: cleanStreams,
     subtitles: stream.subtitles,
     thumbnails_vtt: stream.thumbnails_vtt,
     video_title: stream.video_title,
@@ -648,7 +680,9 @@ async function handleWatch3(anilistId, audio, epNum, origin) {
     intro_end: watchData?.intro_end ?? null,
     outro_start: watchData?.outro_start ?? null,
     outro_end: watchData?.outro_end ?? null,
-    allServers: servers.map((s) => ({ name: s.serverName, type: s.dataType, embed: s.dataLink }))
+    embeds,
+    allServers: servers.map((s) => ({ name: s.serverName, type: s.dataType, embed: s.dataLink })),
+    failedServers: failedServers.map((s) => ({ name: s.server.serverName, type: s.server.dataType, error: s.error }))
   });
 }
 __name(handleWatch3, "handleWatch");

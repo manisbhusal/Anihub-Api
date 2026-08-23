@@ -2,13 +2,9 @@
 
 <img src="docs/logo.svg" width="80" height="80"/>
 
-# Anivexa API 2.2.1
+# Anihub API 2.2.1
 
 **Anime streaming aggregator API — one endpoint, all your sources.**
-
-![Views](https://visitor-badge.laobi.icu/badge?page_id=walterwhite-69.Anivexa-API)
-[![Discord](https://img.shields.io/badge/Join%20Discord-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/MARQ9z9QSX)
-[![GitHub stars](https://img.shields.io/github/stars/walterwhite-69/Anivexa-API?style=flat-square&color=yellow)](https://github.com/walterwhite-69/Anivexa-API/stargazers)
 
 </div>
 
@@ -18,7 +14,7 @@
 
 A single API that aggregates anime episode lists and streaming links from multiple providers. Give it an AniList ID, get back everything — episodes, sources, and stream URLs — all in one place.
 
-It's the backbone powering **[Anivexa](https://github.com/walterwhite-69/Anivexa)**, a full anime streaming client built on top of this.
+It's the backbone powering **[Anizone](https://www.anizone.xyz/home)**, a full anime streaming client built on top of this.
 
 ---
 
@@ -73,8 +69,8 @@ GET /stream/reanime/:id/sub|dub/:ep
 ## Self-hosted
 
 ```bash
-git clone https://github.com/walterwhite-69/Anivexa-API
-cd Anivexa-API
+git clone https://github.com/manisbhusal/Anihub-Api.git
+cd Anihub-API
 npm install
 cp .env.example .env
 node server.js
@@ -113,7 +109,7 @@ Got a provider you'd like added? Open an issue or drop it in the Discord.
 This project is community-kept-alive — if it helps you, please:
 
 - ⭐ **Star the repo** so others can find it
-- 💬 **[Join the Discord](https://discord.gg/MARQ9z9QSX)** to discuss, report issues, or suggest providers
+- 💬 **[Join the Discord](https://discord.gg/Gtk2B2dz5c)** to discuss, report issues, or suggest providers
 - 🛠️ **Open a PR** if you want to add or fix something
 
 ---
