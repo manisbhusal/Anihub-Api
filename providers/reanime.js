@@ -1,4 +1,5 @@
 const __name = (fn, _) => fn;
+import { webcrypto as crypto } from "node:crypto";
 import { getMedia } from '../core/anilist.js';
 import { buildTitles } from '../core/new-provider-utils.js';
 import { get as cacheGet, set as cacheSet, isFresh as cacheIsFresh, SHOW_IDENTITY_TTL } from '../core/smartcache.js';
