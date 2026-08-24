@@ -118,6 +118,6 @@ This project is community-kept-alive — if it helps you, please:
 
 hope it helped :3
 
-[![Discord](https://img.shields.io/badge/Join%20the%20community-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/MARQ9z9QSX)
+[![Discord](https://img.shields.io/badge/Join%20the%20community-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/Gtk2B2dz5c)
 
 </div>
