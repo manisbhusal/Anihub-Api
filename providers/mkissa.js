@@ -7,7 +7,6 @@ const REFERER = "https://mkissa.to";
 const API = "https://api.mkissa.net";
 const API_URL = `${API}/api`;
 const CDN_ROOT = "https://cdn.mkissa.net/all/mk";
-const DISCOVERY_PATH = "/anime/attack-on-titan-Ycid9tDZd2FxGCJ8o/sub/1";
 const ANIZIP = "https://api.ani.zip/mappings";
 const CONTENT_LANE = "k7";
 const REFERER_HOST = "mkissa.to";
@@ -131,14 +130,90 @@ function findBalancedBlock(text, start) {
 }
 __name(findBalancedBlock, "findBalancedBlock");
 
+function findOpeningParen(text, end) {
+  let depth = 0;
+  for (let i = end; i >= 0; i--) {
+    const ch = text[i];
+    if (ch === ")") depth++;
+    else if (ch === "(" && --depth === 0) return i;
+  }
+  return -1;
+}
+__name(findOpeningParen, "findOpeningParen");
+
 function normalizeCryptoConfig(out) {
   if (!out?.buildId || !Array.isArray(out.maskParts) || out.maskParts.length < 4) return null;
   return {
+    scheme: "legacy",
     buildId: String(out.buildId),
     maskParts: out.maskParts.slice(0, 4).map(String)
   };
 }
 __name(normalizeCryptoConfig, "normalizeCryptoConfig");
+
+function functionSource(text, name) {
+  const match = new RegExp(`function\\s+${name}\\s*\\(`).exec(text);
+  if (!match) return null;
+  const start = text.indexOf("{", match.index);
+  const end = findBalancedBlock(text, start);
+  return end === -1 ? null : text.slice(match.index, end);
+}
+__name(functionSource, "functionSource");
+
+function evalFragmentCryptoChunk(chunk) {
+  const configAt = chunk.search(/\b(?:saltMul|fragMul)\s*:/);
+  const declarationAt = configAt === -1 ? -1 : chunk.lastIndexOf("const ", configAt);
+  const layout = declarationAt === -1 ? null : /const\s+([A-Za-z_$][\w$]*)\s*=\s*(.+?),\s*[A-Za-z_$][\w$]*\s*=\s*Number\([^;]+?\),\s*[A-Za-z_$][\w$]*\s*=\s*Number\([^;]+?\),\s*([A-Za-z_$][\w$]*)\s*=\s*(\[[^\]]+\]),\s*([A-Za-z_$][\w$]*)\s*=\s*(\{[^{}]+\})\s*;\s*function\s+[A-Za-z_$][\w$]*\s*\(/.exec(chunk.slice(declarationAt));
+  if (!layout) return null;
+  const [, buildName, buildExpr, partsName, partsExpr, configName, configExpr] = layout;
+  const expression = `${buildExpr};${partsExpr};${configExpr}`;
+  const names = new Set([...expression.matchAll(/\b([A-Za-z_$][\w$]*)\s*\(/g)].map((m) => m[1]));
+  const helpers = [];
+  for (let pass = 0; pass < 8; pass++) {
+    let changed = false;
+    for (const name of [...names]) {
+      if (helpers.some((source) => new RegExp(`function\\s+${name}\\s*\\(`).test(source))) continue;
+      const source = functionSource(chunk, name);
+      if (!source) continue;
+      helpers.push(source);
+      for (const ref of source.matchAll(/\b([A-Za-z_$][\w$]*)\s*\(/g)) {
+        if (!names.has(ref[1])) {
+          names.add(ref[1]);
+          changed = true;
+        }
+      }
+    }
+    if (helpers.some((source) => /^function\s+[A-Za-z_$][\w$]*\s*\(\)\s*\{const\s+e=\[/.test(source))) break;
+    if (!changed) break;
+  }
+  const tableSource = helpers.find((source) => /^function\s+[A-Za-z_$][\w$]*\s*\(\)\s*\{const\s+e=\[/.test(source)) ?? null;
+  const tableName = tableSource?.match(/^function\s+([A-Za-z_$][\w$]*)\s*\(/)?.[1] ?? null;
+  const tableInitEnd = tableName ? chunk.lastIndexOf(`)(${tableName},`, declarationAt) : -1;
+  const tableInitStart = tableInitEnd === -1 ? -1 : findOpeningParen(chunk, tableInitEnd);
+  const tableInit = tableInitStart === -1 || tableInitEnd === -1 ? "" : chunk.slice(tableInitStart, chunk.indexOf(";", tableInitEnd) + 1);
+  if (!tableSource || !tableInit) return null;
+  const source = `${tableSource}\n${tableInit}\n${helpers.filter((source) => !source.startsWith(`function ${tableName}`)).join("\n")}\nreturn { buildId: (${buildExpr}), maskParts: (${partsExpr}), params: (${configExpr}) };`;
+  const out = Function(source)();
+  const params = out?.params;
+  if (!out?.buildId || !Array.isArray(out.maskParts) || out.maskParts.length < 4 || !params || typeof params !== "object") return null;
+  const numeric = ["saltMul", "saltAdd", "fragMul", "fragAdd"];
+  if (numeric.some((key) => !Number.isFinite(Number(params[key])))) return null;
+  if (!Array.isArray(params.parts) || !params.parts.length || typeof params.bootPrefix !== "string" || typeof params.join !== "string") return null;
+  return {
+    scheme: "fragments",
+    buildId: String(out.buildId),
+    maskParts: out.maskParts.slice(0, 4).map(String),
+    saltMul: Number(params.saltMul),
+    saltAdd: Number(params.saltAdd),
+    fragMul: Number(params.fragMul),
+    fragAdd: Number(params.fragAdd),
+    bootPrefix: params.bootPrefix,
+    join: params.join,
+    parts: params.parts.map(String),
+    omitEmptyLane: Boolean(params.omitEmptyLane)
+  };
+}
+__name(evalFragmentCryptoChunk, "evalFragmentCryptoChunk");
 
 function evalOldCryptoChunk(chunk) {
   const cryptoStart = chunk.search(/const\s+[A-Za-z_$][\w$]*\s*=[^;]{0,180}\?"\d+":"",\s*[A-Za-z_$][\w$]*=\[/);
@@ -189,11 +264,15 @@ __name(evalModernCryptoChunk, "evalModernCryptoChunk");
 
 function evalCryptoChunk(chunk) {
   try {
+    const config = evalFragmentCryptoChunk(chunk);
+    if (config) return config;
+  } catch { }
+  try {
     return evalModernCryptoChunk(chunk);
-  } catch {}
+  } catch { }
   try {
     return evalOldCryptoChunk(chunk);
-  } catch {}
+  } catch { }
   return null;
 }
 __name(evalCryptoChunk, "evalCryptoChunk");
@@ -233,8 +312,8 @@ __name(fetchWithTimeout, "fetchWithTimeout");
 async function discoverCryptoConfig(force = false) {
   if (!force && cryptoConfigCache?.expiresAt && Date.now() < cryptoConfigCache.expiresAt) return cryptoConfigCache;
   try {
-    const html = await fetchText(`${REFERER}${DISCOVERY_PATH}`, { Accept: "text/html,*/*" });
-    const appUrl = html.match(/import\("([^"]+\/_app\/immutable\/entry\/app\.[^"]+\.js)"\)/)?.[1] || html.match(/src="([^"]+\/_app\/immutable\/entry\/app\.[^"]+\.js)"/)?.[1];
+    const html = await fetchText(`${REFERER}/`, { Accept: "text/html,*/*" });
+    const appUrl = html.match(/(?:import\(|src=)["']([^"']+\/_app\/immutable\/entry\/app\.[^"']+\.js)["']/)?.[1];
     if (!appUrl) throw new Error("MKissa app entry not found");
     const app = await fetchText(appUrl, { Accept: "application/javascript,*/*" });
     const queue = [appUrl];
@@ -263,8 +342,7 @@ async function discoverCryptoConfig(force = false) {
         }
         if (!/client-crypto|x-aa-boot|aaReq|partB/.test(item.text)) continue;
         const config = evalCryptoChunk(item.text);
-        const valid = config ? await isValidCryptoConfig(config).catch((error) => error?.name === "AbortError" ? null : false) : false;
-        if (config && valid !== false) {
+        if (config) {
           cryptoConfigCache = { ...config, expiresAt: Date.now() + 1800000 };
           return cryptoConfigCache;
         }
@@ -288,7 +366,24 @@ function buildMaskSeed(buildId) {
 }
 __name(buildMaskSeed, "buildMaskSeed");
 
-function buildMask(buildId, maskParts) {
+function buildMask(config) {
+  const { buildId, maskParts } = config;
+  if (config.scheme === "fragments") {
+    const salt = Buffer.alloc(32);
+    const name = String(buildId || "");
+    for (let i = 0; i < salt.length; i++) {
+      salt[i] = (name.charCodeAt(i % name.length) || 0) ^ ((i * config.saltMul + config.saltAdd) & 255);
+    }
+    const out = Buffer.alloc(32);
+    for (let i = 0; i < maskParts.length; i++) {
+      const part = Buffer.from(maskParts[i], "base64");
+      const offset = i * 8;
+      for (let j = 0; j < 8; j++) {
+        out[offset + j] = part[j] ^ salt[offset + j] ^ ((i * config.fragMul + j * config.fragAdd) & 255);
+      }
+    }
+    return out;
+  }
   const seed = buildMaskSeed(buildId);
   const out = Buffer.alloc(32);
   for (let i = 0; i < maskParts.length; i++) {
@@ -310,34 +405,16 @@ function currentEpochs(now = Date.now()) {
 __name(currentEpochs, "currentEpochs");
 
 function makeBootToken(config, epoch, lane = CONTENT_LANE) {
-  const mask = buildMask(config.buildId, config.maskParts);
-  const bootKey = hmacBytes(mask, `aa-boot:${config.buildId}`);
-  return hmacBytes(bootKey, `${config.buildId}:${KEY_GROUP}:${REFERER_HOST}:${epoch}:${lane}`).toString("hex");
+  const mask = buildMask(config);
+  const bootKey = hmacBytes(mask, `${config.bootPrefix ?? "aa-boot:"}${config.buildId}`);
+  if (config.scheme !== "fragments") {
+    return hmacBytes(bootKey, `${config.buildId}:${KEY_GROUP}:${REFERER_HOST}:${epoch}:${lane}`).toString("hex");
+  }
+  const fields = { buildId: config.buildId, group: KEY_GROUP, host: REFERER_HOST, epoch: String(epoch), lane: String(lane || "") };
+  const parts = config.omitEmptyLane && !fields.lane ? config.parts.filter((part) => part !== "lane") : config.parts;
+  return hmacBytes(bootKey, parts.map((part) => fields[part] ?? "").join(config.join)).toString("hex");
 }
 __name(makeBootToken, "makeBootToken");
-
-async function isValidCryptoConfig(config, lane = CONTENT_LANE) {
-  for (const epoch of currentEpochs()) {
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
-    try {
-      const res = await sessionFetch(`${API}/client-crypto/v1/bootstrap?buildId=${encodeURIComponent(config.buildId)}&k=${encodeURIComponent(lane)}`, {
-        signal: ac.signal,
-        headers: {
-          "Referer": `${REFERER}/`,
-          "Origin": REFERER,
-          "x-build-id": config.buildId,
-          "x-aa-boot": makeBootToken(config, epoch, lane)
-        }
-      });
-      if (res.ok) return true;
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-  return false;
-}
-__name(isValidCryptoConfig, "isValidCryptoConfig");
 
 async function fetchBootstrap(lane = CONTENT_LANE, force = false) {
   const config = await discoverCryptoConfig(force);
@@ -364,7 +441,7 @@ async function fetchBootstrap(lane = CONTENT_LANE, force = false) {
       lastError = new Error("Bootstrap missing partB");
       continue;
     }
-    bootstrapCache = { ...data, lane, buildId: config.buildId, maskParts: config.maskParts };
+    bootstrapCache = { ...data, ...config, lane, buildId: config.buildId };
     return bootstrapCache;
   }
   throw lastError || new Error("MKissa bootstrap failed");
@@ -373,7 +450,7 @@ __name(fetchBootstrap, "fetchBootstrap");
 
 function deriveLaneKey(partB, config) {
   const encrypted = Buffer.from(partB, "base64");
-  const mask = buildMask(config.buildId, config.maskParts);
+  const mask = buildMask(config);
   const key = Buffer.alloc(32);
   for (let i = 0; i < 32; i++) {
     key[i] = encrypted[i] ^ mask[i % mask.length];
@@ -722,7 +799,7 @@ async function warmWatchPage(showId, show, epNum, audio) {
         "Upgrade-Insecure-Requests": "1"
       })
     }, FETCH_TIMEOUT_MS);
-  } catch {}
+  } catch { }
 }
 __name(warmWatchPage, "warmWatchPage");
 
@@ -1011,7 +1088,7 @@ async function extractSource(src) {
       const m = url.match(/\/e\/([a-zA-Z0-9]+)/i);
       if (m?.[1]) extractedUrl = await extractStreamlare(m[1]);
     }
-  } catch {}
+  } catch { }
   return {
     name: src.sourceName || "",
     url,
@@ -1068,7 +1145,7 @@ async function fetchKitsuId(malId) {
       const itemJson = await itemRes.json();
       return itemJson.data?.id ? Number(itemJson.data.id) : null;
     }
-  } catch {}
+  } catch { }
   return null;
 }
 __name(fetchKitsuId, "fetchKitsuId");
@@ -1086,7 +1163,7 @@ async function fetchTMDB(titles, year, format) {
         result = json.results[0];
         break;
       }
-    } catch {}
+    } catch { }
   }
   if (!result) return { themoviedbId: null, imdbId: null, thetvdbId: null };
   try {
