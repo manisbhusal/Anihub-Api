@@ -18,7 +18,7 @@ const refreshing = new Set();
 function runBackground(env, promise) {
   const waitUntil = env?.context?.waitUntil ?? env?.waitUntil;
   if (typeof waitUntil === "function") waitUntil.call(env.context ?? env, promise);
-  else promise.catch(() => {});
+  else promise.catch(() => { });
 }
 
 function latestEpisodeFromResponse(data) {
@@ -40,7 +40,8 @@ function latestEpisodeFromResponse(data) {
 function hasCurrentProviders(data) {
   return data &&
     Object.prototype.hasOwnProperty.call(data, "anidbapp") &&
-    Object.prototype.hasOwnProperty.call(data, "anizone");
+    Object.prototype.hasOwnProperty.call(data, "anizone") &&
+    Object.prototype.hasOwnProperty.call(data, "aniwaves");
 }
 
 function latestEpisodeFromAniZip(anizip) {
@@ -57,7 +58,7 @@ function resolveShared(anilistId, freshMedia = false) {
 }
 
 async function clearProviderCache(anilistId, media) {
-  for (const p of ["pahe", "manga", "reanime", "anikoto", "animegg", "anineko", "anidbapp", "2dhive", "anizone"]) {
+  for (const p of ["pahe", "manga", "reanime", "anikoto", "animegg", "anineko", "anidbapp", "2dhive", "anizone", "aniwaves"]) {
     await delAsync(`epv:${p}:${anilistId}`);
   }
   if (media?.idMal) {
