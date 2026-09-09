@@ -1,4 +1,6 @@
 import { getMedia } from "../core/anilist.js";
+import { extractBabaStreamDetails } from "../extractors/babastream.js";
+import { extractMegaPlayDetails } from "../extractors/megaplay.js";
 import { episodeMeta, expectedCount, json } from "../core/new-provider-utils.js";
 
 async function getMalId(anilistId, ctx) {
@@ -160,10 +162,63 @@ async function handleWatch(anilistId, audio, epNum) {
     }
 
     const rawServers = Array.isArray(props.servers) ? props.servers : [];
-    for (const server of rawServers) {
-      if (Boolean(server.dub) !== (audio === "dub")) continue;
-      if (!server.slug) continue;
-      if (server.server_name === "HAdfree") continue;
+    const selectedServers = rawServers.filter((server) =>
+      Boolean(server.dub) === (audio === "dub") && typeof server.slug === "string" && server.slug
+    );
+    const babaStreams = selectedServers.filter((server) => /babastream\.top\/embed\//i.test(server.slug));
+    const megaStreams = selectedServers.filter((server) => /megaplay\.[^/]+\/stream\//i.test(server.slug));
+
+    for (const server of babaStreams) {
+      streams.push({
+        server: server.server_name || "BabaStream",
+        url: server.slug,
+        type: "embed",
+      });
+    }
+
+    const babaResults = await Promise.allSettled(babaStreams.map(async (server) => ({
+      embed: server.slug,
+      source: await extractBabaStreamDetails(server.slug, { userAgent: UA, referer }),
+    })));
+    for (const result of babaResults) {
+      if (result.status !== "fulfilled" || !result.value.source?.url) continue;
+      streams.push({
+        server: "BabaStream",
+        url: result.value.source.url,
+        type: result.value.source.type,
+        embed: result.value.embed,
+        referer: `${result.value.source.origin}/`,
+      });
+    }
+
+    const defaultMegaPlay = `https://megaplay.buzz/stream/mal/${malId}/${epNum}/${audio}`;
+    const megaPlayEmbeds = [...new Set([
+      ...megaStreams.map((server) => server.slug),
+      defaultMegaPlay,
+    ])];
+    const megaPlayResults = await Promise.allSettled(megaPlayEmbeds.map(async (embed) => ({
+      embed,
+      extracted: await extractMegaPlayDetails(embed, { userAgent: UA, referer }),
+    })));
+    for (const result of megaPlayResults) {
+      if (result.status !== "fulfilled") continue;
+      for (const source of result.value.extracted.sources) {
+        const stream = {
+          server: "MegaPlay",
+          url: source.url,
+          type: "hls",
+          variant: source.variant,
+          embed: result.value.embed,
+          referer: `${result.value.extracted.origin}/`,
+          subtitles: result.value.extracted.tracks,
+        };
+        if (result.value.extracted.intro) stream.intro = result.value.extracted.intro;
+        if (result.value.extracted.outro) stream.outro = result.value.extracted.outro;
+        streams.push(stream);
+      }
+    }
+
+    for (const server of megaStreams) {
       streams.push({
         server: server.server_name || "Embed",
         url: server.slug,
@@ -171,28 +226,24 @@ async function handleWatch(anilistId, audio, epNum) {
       });
     }
 
-    const babaStreams = rawServers.filter((server) =>
-      Boolean(server.dub) === (audio === "dub") &&
-      typeof server.slug === "string" &&
-      /babastream\.top\/embed\//i.test(server.slug)
-    );
-    const babaHls = await Promise.allSettled(babaStreams.map(async (server) => ({
-      embed: server.slug,
-      url: await fetchBabaStreamHls(server.slug),
-    })));
-    for (const result of babaHls) {
-      if (result.status !== "fulfilled" || !result.value.url) continue;
+    if (!streams.some((stream) => stream.url === defaultMegaPlay)) {
       streams.push({
-        server: "BabaStream HLS",
-        url: result.value.url,
-        type: "hls",
-        embed: result.value.embed,
+        server: audio === "dub" ? "MegaPlay Dub" : "MegaPlay Sub",
+        url: defaultMegaPlay,
+        type: "embed",
       });
     }
 
-    const hadfreeEntries = rawServers.filter(s =>
-      s.server_name === "HAdfree" && Boolean(s.dub) === (audio === "dub") && s.slug
-    );
+    for (const server of selectedServers) {
+      if (server.server_name === "HAdfree" || babaStreams.includes(server) || megaStreams.includes(server)) continue;
+      streams.push({
+        server: server.server_name || "Embed",
+        url: server.slug,
+        type: "embed",
+      });
+    }
+
+    const hadfreeEntries = selectedServers.filter((server) => server.server_name === "HAdfree");
 
     const hadfreeResults = await Promise.allSettled(
       hadfreeEntries.map(entry =>
@@ -209,10 +260,11 @@ async function handleWatch(anilistId, audio, epNum) {
     }
   }
 
-  if (!streams.some((s) => s.url === `https://megaplay.buzz/stream/mal/${malId}/${epNum}/${audio === "dub" ? "dub" : "sub"}`)) {
+  const defaultMegaPlay = `https://megaplay.buzz/stream/mal/${malId}/${epNum}/${audio}`;
+  if (!streams.some((s) => s.url === defaultMegaPlay)) {
     streams.push({
       server: audio === "dub" ? "MegaPlay Dub" : "MegaPlay Sub",
-      url: `https://megaplay.buzz/stream/mal/${malId}/${epNum}/${audio === "dub" ? "dub" : "sub"}`,
+      url: defaultMegaPlay,
       type: "embed",
     });
   }
@@ -268,22 +320,6 @@ async function fetchHiAnimeHls(malId, epNum, referer) {
     });
     if (!res.ok) return null;
     return res.json().catch(() => null);
-  } catch {
-    return null;
-  }
-}
-
-async function fetchBabaStreamHls(embedUrl) {
-  try {
-    const html = await fetch(embedUrl, {
-      headers: { "User-Agent": UA, "Referer": BASE },
-    }).then((res) => res.ok ? res.text() : null);
-    if (!html) return null;
-    const match = html.match(/\bvar\s+CFG\s*=\s*(\{[^;]+\})\s*;/);
-    if (!match) return null;
-    const config = JSON.parse(match[1]);
-    if (!config.primary || !config.mal || !config.ep || !config.sub) return null;
-    return `${config.primary.replace(/\/+$/, "")}/v2/${encodeURIComponent(config.mal)}/${encodeURIComponent(config.ep)}/${encodeURIComponent(config.sub)}/.m3u8?v=3`;
   } catch {
     return null;
   }
