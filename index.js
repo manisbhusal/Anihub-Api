@@ -1,20 +1,22 @@
-import { getMedia }                from "./core/anilist.js";
-import { mapAnimeIds }             from "./core/mapper.js";
-import mkissaHandler               from "./providers/mkissa.js";
-import reanimeHandler              from "./providers/reanime.js";
-import anikotoHandler              from "./providers/anikoto.js";
-import animeggHandler              from "./providers/animegg.js";
-import aninekoHandler              from "./providers/anineko.js";
-import anidbappHandler             from "./providers/anidbapp.js";
-import dhiveHandler                from "./providers/2dhive.js";
-import animenosubHandler           from "./providers/animenosub.js";
-import anizoneHandler              from "./providers/anizone.js";
-import anibdHandler                from "./providers/anibd.js";
-import senshiHandler               from "./providers/senshi.js";
-import kaaHandler                  from "./providers/kickassanime.js";
-import animedunyaHandler           from "./providers/animedunya.js";
+import { getMedia } from "./core/anilist.js";
+import { mapAnimeIds } from "./core/mapper.js";
+import mkissaHandler from "./providers/mkissa.js";
+import reanimeHandler from "./providers/reanime.js";
+import anikotoHandler from "./providers/anikoto.js";
+import animeggHandler from "./providers/animegg.js";
+import aninekoHandler from "./providers/anineko.js";
+import anidbappHandler from "./providers/anidbapp.js";
+import dhiveHandler from "./providers/2dhive.js";
+import animenosubHandler from "./providers/animenosub.js";
+import anizoneHandler from "./providers/anizone.js";
+import aniwavesHandler from "./providers/aniwaves.js";
+import anibdHandler from "./providers/anibd.js";
+import senshiHandler from "./providers/senshi.js";
+import kaaHandler from "./providers/kickassanime.js";
+import animedunyaHandler from "./providers/animedunya.js";
+import animeonsenHandler from "./providers/animeonsen.js";
 import { getEpisodesResponse, getFilteredEpisodesResponse } from "./core/episode-cache.js";
-import { resolveProviders }         from "./core/episode-strategy.js";
+import { resolveProviders } from "./core/episode-strategy.js";
 import { getAsync, setAsync, isFresh, mapTTL, WATCH_TTL, _CACHE_ENABLED } from "./core/smartcache.js";
 
 function json(data, status = 200) {
@@ -41,7 +43,7 @@ async function cachedWatch(cacheKey, handlerFn) {
   if (entry && isFresh(entry)) return json(entry.data);
 
   if (watchInflight.has(cacheKey)) {
-    await watchInflight.get(cacheKey).catch(() => {});
+    await watchInflight.get(cacheKey).catch(() => { });
     const warm = await getAsync(cacheKey);
     if (warm && isFresh(warm)) return json(warm.data);
     return handlerFn();
@@ -53,26 +55,26 @@ async function cachedWatch(cacheKey, handlerFn) {
       try {
         const data = await response.clone().json();
         await setAsync(cacheKey, data, WATCH_TTL);
-      } catch {}
+      } catch { }
     }
     return response;
   })();
 
   watchInflight.set(cacheKey, promise);
-  try   { return await promise; }
+  try { return await promise; }
   finally { watchInflight.delete(cacheKey); }
 }
 
 export default {
   async fetch(request, env) {
-    const url  = new URL(request.url);
+    const url = new URL(request.url);
     const path = url.pathname;
 
     if (request.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
         headers: {
-          "Access-Control-Allow-Origin":  "*",
+          "Access-Control-Allow-Origin": "*",
           "Access-Control-Allow-Methods": "GET, OPTIONS",
           "Access-Control-Allow-Headers": "*",
         },
@@ -82,8 +84,8 @@ export default {
     let m = path.match(/^\/map\/(\d+)\/?$/);
     if (m) {
       const anilistId = m[1];
-      const cacheKey  = `map:${anilistId}`;
-      const entry     = await getAsync(cacheKey);
+      const cacheKey = `map:${anilistId}`;
+      const entry = await getAsync(cacheKey);
       if (entry && isFresh(entry)) return json(entry.data);
 
       try {
@@ -101,7 +103,7 @@ export default {
 
     m = path.match(/^\/episodes\/((?:[\w-]+\/)+)(\d+)\/?$/i);
     if (m) {
-      const rawNames  = m[1].replace(/\/$/, "").split("/");
+      const rawNames = m[1].replace(/\/$/, "").split("/");
       const anilistId = m[2];
       const includeMap = url.searchParams.get("map") !== "false";
       const { resolved, unknown } = resolveProviders(rawNames);
@@ -220,6 +222,15 @@ export default {
       );
     }
 
+    m = path.match(/^\/watch\/aniwaves\/(\d+)\/(sub|dub)\/aniwaves-(\d+)\/?$/);
+    if (m) {
+      const [, id, audio, ep] = m;
+      return cachedWatch(
+        `watch:aniwaves:${id}:${audio}:${ep}`,
+        () => aniwavesHandler.fetch(request)
+      );
+    }
+
     m = path.match(/^\/watch\/anibd\/(\d+)\/(sub|dub)\/anibd-(\d+)\/?$/);
     if (m) {
       const [, id, audio, ep] = m;
@@ -256,6 +267,15 @@ export default {
       );
     }
 
+    m = path.match(/^\/watch\/animeonsen\/(\d+)\/(sub|dub)\/animeonsen-(\d+)\/?$/);
+    if (m) {
+      const [, id, audio, ep] = m;
+      return cachedWatch(
+        `watch:animeonsen:${id}:${audio}:${ep}`,
+        () => animeonsenHandler.fetch(request)
+      );
+    }
+
     m = path.match(/^\/stream\/2dhive\/(\d+)\/(sub|dub)\/(\d+)\/?$/);
     if (m) return dhiveHandler.fetch(request);
 
@@ -275,10 +295,12 @@ export default {
         "2dhive",
         "animenosub",
         "anizone",
+        "aniwaves",
         "anibd",
         "senshi",
         "kaa",
         "animedunya",
+        "animeonsen",
       ],
       routes: [
         "/map/:anilistId",
@@ -296,10 +318,12 @@ export default {
         "/stream/2dhive/download/:id/sub|dub/:ep",
         "/watch/animenosub/:id/sub|dub/animenosub-:ep",
         "/watch/anizone/:id/sub|dub/anizone-:ep",
+        "/watch/aniwaves/:id/sub|dub/aniwaves-:ep",
         "/watch/anibd/:id/sub|dub/anibd-:ep",
         "/watch/senshi/:id/sub|dub/senshi-:ep",
         "/watch/kaa/:id/sub|dub/kaa-:ep",
         "/watch/animedunya/:id/sub|dub/animedunya-:ep",
+        "/watch/animeonsen/:id/sub|dub/animeonsen-:ep",
       ],
     });
   },

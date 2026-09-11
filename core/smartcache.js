@@ -68,19 +68,19 @@ async function redisWrite(key, entry) {
   await redisCommand(["SET", key, value, "PX", Math.ceil(ttlMs)]);
 }
 
-let diskRead  = () => null;
-let diskWrite = () => {};
-let diskDel   = () => {};
+let diskRead = () => null;
+let diskWrite = () => { };
+let diskDel = () => { };
 
 if (IS_LOCAL_NODE) {
   const { readFileSync, mkdirSync, existsSync } = await import("node:fs");
-  const { writeFile, unlink }                   = await import("node:fs/promises");
-  const { join, dirname }                        = await import("node:path");
-  const { fileURLToPath }                        = await import("node:url");
+  const { writeFile, unlink } = await import("node:fs/promises");
+  const { join, dirname } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
 
-  const __dir    = dirname(fileURLToPath(import.meta.url));
+  const __dir = dirname(fileURLToPath(import.meta.url));
   const CACHE_DIR = join(__dir, ".cache");
-  try { mkdirSync(CACHE_DIR, { recursive: true }); } catch {}
+  try { mkdirSync(CACHE_DIR, { recursive: true }); } catch { }
 
   const keyToPath = (key) =>
     join(CACHE_DIR, key.replace(/[^a-zA-Z0-9_-]/g, "_") + ".json");
@@ -94,21 +94,21 @@ if (IS_LOCAL_NODE) {
   };
 
   diskWrite = (key, entry) => {
-    writeFile(keyToPath(key), encodeEntry(entry)).catch(() => {});
+    writeFile(keyToPath(key), encodeEntry(entry)).catch(() => { });
   };
 
   diskDel = (key) => {
-    unlink(keyToPath(key)).catch(() => {});
+    unlink(keyToPath(key)).catch(() => { });
   };
 }
 
 const MAX_MEM = 800;
-const mem     = new Map();
+const mem = new Map();
 
 function evict() {
   if (mem.size <= MAX_MEM) return;
   const drop = mem.size - MAX_MEM;
-  let   n    = 0;
+  let n = 0;
   for (const k of mem.keys()) {
     if (n++ >= drop) break;
     mem.delete(k);
@@ -152,13 +152,13 @@ export async function getAsync(key) {
 }
 
 function setLocal(key, data, ttlMs, refreshAfterMs) {
-  const now   = Date.now();
+  const now = Date.now();
   const entry = {
     data,
-    cachedAt:     now,
-    ttl:          ttlMs,
+    cachedAt: now,
+    ttl: ttlMs,
     refreshAfter: refreshAfterMs ?? ttlMs,
-    expiresAt:    now + ttlMs,
+    expiresAt: now + ttlMs,
   };
   mem.delete(key);
   mem.set(key, entry);
@@ -170,7 +170,7 @@ function setLocal(key, data, ttlMs, refreshAfterMs) {
 export function set(key, data, ttlMs, refreshAfterMs) {
   if (!_CACHE_ENABLED) return { data, cachedAt: Date.now(), ttl: ttlMs, refreshAfter: refreshAfterMs ?? ttlMs, expiresAt: Date.now() + ttlMs };
   const entry = setLocal(key, data, ttlMs, refreshAfterMs);
-  redisWrite(key, entry).catch(() => {});
+  redisWrite(key, entry).catch(() => { });
   return entry;
 }
 
@@ -196,7 +196,7 @@ function delLocal(key) {
 
 export function del(key) {
   delLocal(key);
-  redisCommand(["DEL", key]).catch(() => {});
+  redisCommand(["DEL", key]).catch(() => { });
 }
 
 export async function delAsync(key) {
@@ -218,27 +218,17 @@ export async function delByPrefixAsync(prefix) {
   }
 }
 
-const MIN  = 60_000;
+const MIN = 60_000;
 const HOUR = 60 * MIN;
-const DAY  = 24 * HOUR;
+const DAY = 24 * HOUR;
 
 export function episodeTTL(status) {
   switch (status) {
-    case "FINISHED":         return [7 * DAY,   Infinity];
-    case "RELEASING":        return [2 * HOUR,  15 * MIN];
-    case "HIATUS":           return [6 * HOUR,  60 * MIN];
-    case "NOT_YET_RELEASED": return [30 * MIN,  15 * MIN];
-    default:                 return [HOUR,       15 * MIN];
-  }
-}
-
-export function jikanPageTTL(isLastPage, status) {
-  if (!isLastPage || status === "FINISHED") return [7 * DAY, Infinity];
-  switch (status) {
-    case "RELEASING":        return [2 * HOUR,  15 * MIN];
-    case "HIATUS":           return [6 * HOUR,  60 * MIN];
-    case "NOT_YET_RELEASED": return [30 * MIN,  15 * MIN];
-    default:                 return [2 * HOUR,  15 * MIN];
+    case "FINISHED": return [7 * DAY, Infinity];
+    case "RELEASING": return [2 * HOUR, 15 * MIN];
+    case "HIATUS": return [6 * HOUR, 60 * MIN];
+    case "NOT_YET_RELEASED": return [30 * MIN, 15 * MIN];
+    default: return [HOUR, 15 * MIN];
   }
 }
 
@@ -246,6 +236,6 @@ export function mapTTL(status) {
   return status === "FINISHED" ? 30 * DAY : 12 * HOUR;
 }
 
-export const WATCH_TTL         = 3 * HOUR;
+export const WATCH_TTL = 3 * HOUR;
 export const SHOW_IDENTITY_TTL = 24 * HOUR;
-export const THIRTY_DAYS       = 30 * DAY;
+export const THIRTY_DAYS = 30 * DAY;

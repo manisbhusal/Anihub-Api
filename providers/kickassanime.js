@@ -13,10 +13,10 @@ import {
   SHOW_IDENTITY_TTL,
 } from "../core/smartcache.js";
 
-const BASE     = "https://kaa.lt";
+const BASE = "https://kaa.lt";
 const HLS_BASE = "https://hls.krussdomi.com/manifest";
-const UA       = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
-const H        = { "User-Agent": UA, Accept: "application/json" };
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+const H = { "User-Agent": UA, Accept: "application/json" };
 
 async function kaaSearch(query) {
   const res = await fetch(`${BASE}/api/fsearch`, {
@@ -46,8 +46,8 @@ async function kaaEpisodePage(showSlug, ep) {
 
 async function kaaAllEpisodes(showSlug) {
   const first = await kaaEpisodePage(showSlug, 1);
-  const pages  = Array.isArray(first.pages)  ? first.pages  : [];
-  const all    = Array.isArray(first.result) ? [...first.result] : [];
+  const pages = Array.isArray(first.pages) ? first.pages : [];
+  const all = Array.isArray(first.result) ? [...first.result] : [];
 
   if (pages.length > 1) {
     const rest = await Promise.all(
@@ -92,7 +92,7 @@ function buildKaaQueries(titles) {
 
 function scoreCandidate(candidate, titles, seasonYear, anilistFormat) {
   const titleEn = candidate.title_en || "";
-  const titleJp = candidate.title   || "";
+  const titleJp = candidate.title || "";
   const kaaYear = Number(candidate.year);
   const kaaType = (candidate.type || "").toLowerCase();
 
@@ -105,31 +105,31 @@ function scoreCandidate(candidate, titles, seasonYear, anilistFormat) {
   let yearMult = 1.0;
   if (seasonYear && kaaYear) {
     const diff = Math.abs(Number(seasonYear) - kaaYear);
-    if (diff === 0)      yearMult = 1.2;
+    if (diff === 0) yearMult = 1.2;
     else if (diff === 1) yearMult = 0.8;
-    else                 yearMult = 0.5;
+    else yearMult = 0.5;
   }
 
   let typeMult = 1.0;
   const af = (anilistFormat || "").toUpperCase();
-  if      (af === "MOVIE" && kaaType !== "movie")                        typeMult = 0.25;
-  else if (af !== "MOVIE" && kaaType === "movie")                        typeMult = 0.25;
+  if (af === "MOVIE" && kaaType !== "movie") typeMult = 0.25;
+  else if (af !== "MOVIE" && kaaType === "movie") typeMult = 0.25;
   else if ((af === "OVA" || af === "ONA" || af === "SPECIAL") && kaaType === "tv") typeMult = 0.5;
-  else if (af === "TV"   && (kaaType === "ova" || kaaType === "special")) typeMult = 0.5;
+  else if (af === "TV" && (kaaType === "ova" || kaaType === "special")) typeMult = 0.5;
 
   return Math.min(1, base * yearMult) * typeMult;
 }
 
 async function resolveSeries(anilistId, ctx = {}) {
   const cacheKey = `np:kaa:${anilistId}`;
-  const cached   = cacheGet(cacheKey);
+  const cached = cacheGet(cacheKey);
   if (isFresh(cached)) return cached.data;
 
-  const media      = ctx.media ?? await getMedia(anilistId);
-  const titles     = buildTitles(media, ctx.anizip);
-  const queries    = buildKaaQueries(titles);
+  const media = ctx.media ?? await getMedia(anilistId);
+  const titles = buildTitles(media, ctx.anizip);
+  const queries = buildKaaQueries(titles);
   const seasonYear = media?.seasonYear;
-  const format     = media?.format;
+  const format = media?.format;
 
   if (!queries.length) throw new Error(`KAA: no usable search queries for AniList ${anilistId}`);
 
@@ -141,7 +141,7 @@ async function resolveSeries(anilistId, ctx = {}) {
         for (const r of results) {
           if (!allCandidates.has(r.slug)) allCandidates.set(r.slug, r);
         }
-      } catch {}
+      } catch { }
     })
   );
 
@@ -152,8 +152,8 @@ async function resolveSeries(anilistId, ctx = {}) {
     const score = scoreCandidate(candidate, titles, seasonYear, format);
     if (score >= 0.5) {
       scored.push({
-        slug:    candidate.slug,
-        title:   candidate.title_en || candidate.title,
+        slug: candidate.slug,
+        title: candidate.title_en || candidate.title,
         locales: Array.isArray(candidate.locales) ? candidate.locales : [],
         score,
       });
@@ -174,10 +174,10 @@ async function resolveSeries(anilistId, ctx = {}) {
   }
 
   const data = {
-    slug:    best.slug,
-    title:   best.title,
+    slug: best.slug,
+    title: best.title,
     locales: best.locales,
-    score:   best.score,
+    score: best.score,
   };
   cacheSet(cacheKey, data, SHOW_IDENTITY_TTL);
   return data;
@@ -191,43 +191,43 @@ async function buildEpMap(showSlug, showInfo) {
   }
   const episodes = await kaaAllEpisodes(showSlug);
   return episodes.map((e) => ({
-    number:   e.episode_number,
+    number: e.episode_number,
     fullSlug: `ep-${e.episode_number}-${e.slug}`,
-    title:    e.title,
+    title: e.title,
     duration: e.duration_ms ? Math.round(e.duration_ms / 1000) : null,
   }));
 }
 
 export async function getEpisodes(anilistId, ctx = {}) {
-  const media    = ctx.media ?? await getMedia(anilistId);
+  const media = ctx.media ?? await getMedia(anilistId);
   const localCtx = { ...ctx, media };
-  const series   = await resolveSeries(anilistId, localCtx);
+  const series = await resolveSeries(anilistId, localCtx);
   const showInfo = await kaaShowInfo(series.slug);
 
-  const locales  = Array.isArray(showInfo.locales) ? showInfo.locales : series.locales;
-  const hasDub   = locales.includes("en-US");
+  const locales = Array.isArray(showInfo.locales) ? showInfo.locales : series.locales;
+  const hasDub = locales.includes("en-US");
 
-  const epMap    = await buildEpMap(series.slug, showInfo);
+  const epMap = await buildEpMap(series.slug, showInfo);
   if (!epMap.length) throw new Error(`KAA: no episodes found for AniList ${anilistId} (slug: ${series.slug})`);
 
-  const expected = expectedCount(media, ctx.anizip, ctx.jikanEps);
-  const sub      = [];
-  const dub      = [];
+  const expected = expectedCount(media, ctx.anizip);
+  const sub = [];
+  const dub = [];
 
   for (const ep of epMap) {
     const num = ep.number;
-    if (!Number.isFinite(num) || num < 1)   continue;
-    if (expected && num > expected)          continue;
+    if (!Number.isFinite(num) || num < 1) continue;
+    if (expected && num > expected) continue;
     const meta = episodeMeta(num, localCtx);
     const base = {
-      number:      num,
-      title:       meta.title       ?? ep.title ?? `Episode ${num}`,
-      duration:    meta.duration    ?? ep.duration,
-      filler:      meta.filler,
-      uncensored:  false,
+      number: num,
+      title: meta.title ?? ep.title ?? `Episode ${num}`,
+      duration: meta.duration ?? ep.duration,
+      filler: meta.filler,
+      uncensored: false,
       description: meta.description,
-      image:       meta.image,
-      airDate:     meta.airDate,
+      image: meta.image,
+      airDate: meta.airDate,
     };
     sub.push({ id: `watch/kaa/${anilistId}/sub/kaa-${num}`, ...base, audio: "sub" });
     if (hasDub) {
@@ -237,9 +237,9 @@ export async function getEpisodes(anilistId, ctx = {}) {
 
   return {
     meta: {
-      id:         series.slug,
-      title:      series.title,
-      source:     "kaa",
+      id: series.slug,
+      title: series.title,
+      source: "kaa",
       matchScore: Number(series.score.toFixed(3)),
     },
     episodes: { sub, dub },
@@ -247,7 +247,7 @@ export async function getEpisodes(anilistId, ctx = {}) {
 }
 
 async function handleWatch(anilistId, audio, epNum) {
-  const series   = await resolveSeries(anilistId);
+  const series = await resolveSeries(anilistId);
   const showInfo = await kaaShowInfo(series.slug);
 
   const locales = Array.isArray(showInfo.locales) ? showInfo.locales : series.locales;
@@ -256,13 +256,13 @@ async function handleWatch(anilistId, audio, epNum) {
   }
 
   const epMap = await buildEpMap(series.slug, showInfo);
-  const ep    = epMap.find((e) => e.number === Number(epNum));
+  const ep = epMap.find((e) => e.number === Number(epNum));
   if (!ep) {
     return json({ error: `KAA: episode ${epNum} not found for AniList ${anilistId}` }, 404);
   }
 
   const episodeData = await kaaEpisodeServers(series.slug, ep.fullSlug);
-  const servers     = Array.isArray(episodeData.servers) ? episodeData.servers : [];
+  const servers = Array.isArray(episodeData.servers) ? episodeData.servers : [];
   if (!servers.length) {
     return json({ error: `KAA: no streams for episode ${epNum} (AniList ${anilistId})` }, 404);
   }
@@ -273,10 +273,10 @@ async function handleWatch(anilistId, audio, epNum) {
     const m = s.src.match(/[?&]id=([^&]+)/);
     if (!m) continue;
     streams.push({
-      url:      `${HLS_BASE}/${m[1]}/master.m3u8`,
-      type:     "hls",
-      server:   s.name || "KAA",
-      headers:  { Referer: "https://krussdomi.com/" },
+      url: `${HLS_BASE}/${m[1]}/master.m3u8`,
+      type: "hls",
+      server: s.name || "KAA",
+      headers: { Referer: "https://krussdomi.com/" },
       priority: 1,
       isActive: true,
     });
@@ -288,7 +288,7 @@ async function handleWatch(anilistId, audio, epNum) {
 
   return json({
     anilistId: Number(anilistId),
-    episode:   Number(epNum),
+    episode: Number(epNum),
     audio,
     streams,
   });
@@ -300,7 +300,7 @@ export default {
       return new Response(null, {
         status: 204,
         headers: {
-          "Access-Control-Allow-Origin":  "*",
+          "Access-Control-Allow-Origin": "*",
           "Access-Control-Allow-Methods": "GET,OPTIONS",
           "Access-Control-Allow-Headers": "*",
         },
