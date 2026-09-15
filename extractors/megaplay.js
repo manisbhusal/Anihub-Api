@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import vm from "node:vm";
 
 const DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
@@ -93,12 +94,44 @@ function decryptMegaPlaySource(value, script) {
                 const decipher = crypto.createDecipheriv("aes-256-cbc", key, Buffer.from(ivValue));
                 const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
                 const data = JSON.parse(decrypted.toString("utf8"));
-                const source = data?.file ?? data?.url;
+                const source = data?.file ?? data?.url ?? data?.sources?.file ?? data?.sources?.[0]?.file;
                 if (typeof source === "string" && source) return source;
             } catch { }
         }
     }
     return null;
+}
+
+function getMegaPlaySigningKey(script) {
+    const entry = script.indexOf("const MZzE=");
+    if (entry < 0) return null;
+
+    try {
+        const context = { console, decodeURI, encodeURI, Math, String, Array, Object, RegExp, Error, SyntaxError };
+        context.globalThis = context;
+        vm.runInNewContext(
+            `${script.slice(0, entry)};globalThis.__megaPlaySigningKey=jlkC.ncGy(39);`,
+            context,
+            { timeout: 5000 }
+        );
+        return typeof context.__megaPlaySigningKey === "string" ? context.__megaPlaySigningKey : null;
+    } catch {
+        return null;
+    }
+}
+
+function signMegaPlayUrl(value, signingKey) {
+    if (!value || !signingKey || /[?&]token=/i.test(value)) return value;
+    const match = String(value).match(/\/([a-f0-9]{32})\/([a-f0-9]{32})\//i);
+    if (!match) return value;
+
+    const pathKey = `${match[1].toLowerCase()}/${match[2].toLowerCase()}`;
+    const payload = `${Math.floor(Date.now() / 1000) + 90}|${pathKey}`;
+    const signature = crypto.createHmac("sha256", signingKey).update(payload).digest("base64url");
+    const token = `${Buffer.from(payload).toString("base64url")}.${signature}`;
+    const endpoint = new URL(value);
+    endpoint.searchParams.set("token", token);
+    return endpoint.href;
 }
 
 function buildSourceUrl(origin, path, fileId) {
@@ -140,6 +173,7 @@ export async function extractMegaPlayDetails(embedUrl, { fetchImpl = fetch, user
         try { return await fetchText(fetchImpl, url, { "User-Agent": userAgent, "Referer": pageUrl.href }); } catch { return null; }
     }));
     const script = scripts.find((value) => /getSources/i.test(value) && /AES-CBC/i.test(value));
+    const signingScript = scripts.find((value) => value.includes("const kQiC=") && value.includes("[a-f0-9]{32}"));
     if (!script) throw new Error(`MegaPlay client script not found: ${embedUrl}`);
     const { legacy, modern } = getMegaPlayRoutes(script);
     if (!legacy && !modern) throw new Error(`MegaPlay source routes not found: ${embedUrl}`);
@@ -153,9 +187,17 @@ export async function extractMegaPlayDetails(embedUrl, { fetchImpl = fetch, user
         modern ? fetchJson(fetchImpl, buildSourceUrl(pageUrl.origin, modern, fileId), sourceHeaders).catch(() => null) : null,
         legacy ? fetchJson(fetchImpl, buildSourceUrl(pageUrl.origin, legacy, fileId), sourceHeaders).catch(() => null) : null,
     ]);
-    const legacyUrl = legacyData?.sources?.file ?? decryptMegaPlaySource(legacyData?.enc, script);
+    const signingKey = signingScript ? getMegaPlaySigningKey(signingScript) : null;
+    const modernUrl = signMegaPlayUrl(
+        modernData?.sources?.file ?? decryptMegaPlaySource(modernData?.enc, script),
+        signingKey
+    );
+    const legacyUrl = signMegaPlayUrl(
+        legacyData?.sources?.file ?? decryptMegaPlaySource(legacyData?.enc, script),
+        signingKey
+    );
     const sources = [
-        modernData?.sources?.file ? { url: modernData.sources.file, variant: "modern" } : null,
+        modernUrl ? { url: modernUrl, variant: "modern" } : null,
         legacyUrl ? { url: legacyUrl, variant: "legacy" } : null,
     ].filter((source, index, all) => source && all.findIndex((candidate) => candidate?.url === source.url) === index);
     if (!sources.length) throw new Error(`MegaPlay response has no sources: ${embedUrl}`);

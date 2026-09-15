@@ -37,8 +37,9 @@ function rewriteRequest(request, newPath) {
 }
 
 const watchInflight = new Map();
+const SIGNED_STREAM_WATCH_TTL = 60_000;
 
-async function cachedWatch(cacheKey, handlerFn) {
+async function cachedWatch(cacheKey, handlerFn, ttl = WATCH_TTL) {
   const entry = await getAsync(cacheKey);
   if (entry && isFresh(entry)) return json(entry.data);
 
@@ -54,7 +55,7 @@ async function cachedWatch(cacheKey, handlerFn) {
     if (response.status === 200) {
       try {
         const data = await response.clone().json();
-        await setAsync(cacheKey, data, WATCH_TTL);
+        await setAsync(cacheKey, data, ttl);
       } catch { }
     }
     return response;
@@ -164,7 +165,8 @@ export default {
       const [, id, audio, ep] = m;
       return cachedWatch(
         `watch:anikoto:${id}:${audio}:${ep}`,
-        () => anikotoHandler.fetch(request)
+        () => anikotoHandler.fetch(request),
+        SIGNED_STREAM_WATCH_TTL
       );
     }
 
@@ -200,7 +202,8 @@ export default {
       const [, id, audio, ep] = m;
       return cachedWatch(
         `watch:2dhive:${id}:${audio}:${ep}`,
-        () => dhiveHandler.fetch(request)
+        () => dhiveHandler.fetch(request),
+        SIGNED_STREAM_WATCH_TTL
       );
     }
 
@@ -245,7 +248,8 @@ export default {
       const [, id, audio, ep] = m;
       return cachedWatch(
         `watch:senshi:${id}:${audio}:${ep}`,
-        () => senshiHandler.fetch(request)
+        () => senshiHandler.fetch(request),
+        SIGNED_STREAM_WATCH_TTL
       );
     }
 

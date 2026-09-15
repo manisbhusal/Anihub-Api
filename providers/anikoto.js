@@ -156,6 +156,12 @@ function mapTrack(t, source) {
   };
 }
 
+function streamRank(stream) {
+  if (stream.type === "hls" && stream.variant === "modern") return 0;
+  if (stream.type === "hls") return 1;
+  return 2;
+}
+
 async function extractEmbedSource(embedUrl) {
   try {
     return await extractMegaPlayDetails(embedUrl, { userAgent: UA, referer: SPOOF_REF });
@@ -477,6 +483,12 @@ async function handleWatch(anilistId, audio, epNum, ctx = {}) {
       });
     }
   }
+
+  streams.sort((left, right) => streamRank(left) - streamRank(right));
+  streams.forEach((stream, index) => {
+    stream.priority = index === 0 ? 5 : 4;
+    stream.isActive = index === 0;
+  });
 
   return jsonResponse({
     anilistId: parseInt(anilistId),
