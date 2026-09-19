@@ -46,10 +46,10 @@ const MODIFIERS = [
 function scoreCandidate(cand, primaryEn, primaryRom, synonyms) {
   let score = 0;
   const candNameNorm = normalize(cand.name);
-  const candJpNorm = normalize(cand.jp);
+  const candJpNorm   = normalize(cand.jp);
   const candSlugNorm = normalize(cand.slug);
 
-  const normEn = normalize(primaryEn);
+  const normEn  = normalize(primaryEn);
   const normRom = normalize(primaryRom);
 
   if (normEn && candNameNorm === normEn) score += 1000;
@@ -57,7 +57,7 @@ function scoreCandidate(cand, primaryEn, primaryRom, synonyms) {
   if (normRom && candJpNorm === normRom) score += 800;
 
   const targetText = `${primaryEn || ""} ${primaryRom || ""} ${(synonyms || []).join(" ")}`.toLowerCase();
-
+  
   for (const mod of MODIFIERS) {
     const candHasMod = candNameNorm.includes(mod) || candSlugNorm.includes(mod);
     const targetHasMod = targetText.includes(mod);
@@ -86,7 +86,7 @@ function scoreCandidate(cand, primaryEn, primaryRom, synonyms) {
 async function searchAnikoto(query) {
   const searchHtml = await httpGet(`${ANIKOTO}/filter?keyword=${encodeURIComponent(query)}`, { Referer: `${ANIKOTO}/` });
   const candidates = [];
-
+  
   const re = /<a\s+class="name d-title"\s+href="https:\/\/anikototv\.to\/watch\/([^"/]+)(?:\/ep-\d+)?"[^>]*data-jp="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g;
   let m;
   while ((m = re.exec(searchHtml)) !== null) {
@@ -160,6 +160,12 @@ function streamRank(stream) {
   if (stream.type === "hls" && stream.variant === "modern") return 0;
   if (stream.type === "hls") return 1;
   return 2;
+}
+
+function subtitleTypeFromServerType(typeName) {
+  if (typeName === "hsub") return "hardsub";
+  if (typeName === "sub") return "softsub";
+  return null;
 }
 
 async function extractEmbedSource(embedUrl) {
@@ -331,8 +337,8 @@ async function handleWatch(anilistId, audio, epNum, ctx = {}) {
 
       if (typeName === "dl" || name.toLowerCase().includes("download") || name.toLowerCase().includes("kiwi")) {
         downloadItems.push({ linkId, name });
-      } else if (typeName === audio) {
-        serverItems.push({ linkId, name });
+      } else if (typeName === audio || (audio === "sub" && typeName === "hsub")) {
+        serverItems.push({ linkId, name, serverType: typeName, subtitleType: subtitleTypeFromServerType(typeName) });
       }
     }
   }
@@ -342,7 +348,12 @@ async function handleWatch(anilistId, audio, epNum, ctx = {}) {
       if (sKey === "status") continue;
       const cleanName = sKey.replace(/[-_]+$/, "").trim();
       if (sObj?.[audio]?.url) {
-        serverItems.push({ linkId: sObj[audio].url, name: cleanName });
+        serverItems.push({
+          linkId: sObj[audio].url,
+          name: cleanName,
+          serverType: audio,
+          subtitleType: subtitleTypeFromServerType(audio)
+        });
       }
       if (sObj?.[audio]?.download) {
         for (const [dLabel, dUrl] of Object.entries(sObj[audio].download)) {
@@ -363,15 +374,16 @@ async function handleWatch(anilistId, audio, epNum, ctx = {}) {
   const dlSeen = new Set();
 
   for (const item of serverItems) {
-    if (serverSeen.has(item.name)) continue;
-    serverSeen.add(item.name);
+    const serverKey = `${item.name}:${item.subtitleType || item.serverType || audio}`;
+    if (serverSeen.has(serverKey)) continue;
+    serverSeen.add(serverKey);
 
     const resolved = item.linkId.startsWith("http")
       ? { result: { url: item.linkId } }
       : await getJSON(`${ANIKOTO}/ajax/server?get=${encodeURIComponent(item.linkId)}`, {
-        "X-Requested-With": "XMLHttpRequest",
-        Referer: `${ANIKOTO}/`
-      }).catch(() => null);
+          "X-Requested-With": "XMLHttpRequest",
+          Referer: `${ANIKOTO}/`
+        }).catch(() => null);
 
     const embedUrl = resolved?.result?.url;
     if (!embedUrl) continue;
@@ -397,7 +409,7 @@ async function handleWatch(anilistId, audio, epNum, ctx = {}) {
         if (decodedUrl.includes(".m3u8")) {
           hlsSources.push({ url: decodedUrl, variant: null });
         }
-      } catch (e) { }
+      } catch (e) {}
     }
 
     const extracted = await extractEmbedSource(embedUrl);
@@ -437,6 +449,7 @@ async function handleWatch(anilistId, audio, epNum, ctx = {}) {
           priority: streams.length ? 4 : 5,
           isActive: streams.length === 0
         };
+        if (item.subtitleType) streamObj.subtitleType = item.subtitleType;
         if (source.variant) streamObj.variant = source.variant;
         if (serverIntro.start || serverIntro.end) streamObj.intro = serverIntro;
         if (serverOutro.start || serverOutro.end) streamObj.outro = serverOutro;
@@ -450,6 +463,7 @@ async function handleWatch(anilistId, audio, epNum, ctx = {}) {
         priority: 4,
         isActive: false
       });
+      if (item.subtitleType) streams[streams.length - 1].subtitleType = item.subtitleType;
     } else {
       const streamObj = {
         url: embedUrl,
@@ -459,6 +473,7 @@ async function handleWatch(anilistId, audio, epNum, ctx = {}) {
         priority: 4,
         isActive: streams.length === 0
       };
+      if (item.subtitleType) streamObj.subtitleType = item.subtitleType;
       if (serverIntro.start || serverIntro.end) streamObj.intro = serverIntro;
       if (serverOutro.start || serverOutro.end) streamObj.outro = serverOutro;
       streams.push(streamObj);
