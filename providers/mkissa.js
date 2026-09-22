@@ -306,6 +306,20 @@ function bootstrapBuildDeclaration(chunk) {
 }
 __name(bootstrapBuildDeclaration, "bootstrapBuildDeclaration");
 
+function previousArrayAndBuildDeclaration(chunk, before) {
+  const matches = [...chunk.slice(0, before).matchAll(/\b(?:const|let|var)\s+/g)];
+  for (let i = matches.length - 1; i >= 0; i--) {
+    const statement = declarationStatementAt(chunk, matches[i].index + matches[i][0].length);
+    if (!statement?.entries.length || statement.start >= before) continue;
+    const partsIndex = statement.entries.findIndex((entry) => entry.expression.trim().startsWith("["));
+    if (partsIndex < 0) continue;
+    const build = statement.entries.find((entry, index) => index < partsIndex && !entry.expression.trim().startsWith("["));
+    if (build) return { build, parts: statement.entries[partsIndex] };
+  }
+  return null;
+}
+__name(previousArrayAndBuildDeclaration, "previousArrayAndBuildDeclaration");
+
 function validEpisodeQuery(query) {
   return typeof query === "string" &&
     !/[\uD800-\uDFFF]/.test(query) &&
@@ -354,11 +368,13 @@ function evalFragmentCryptoChunk(chunk) {
       return entry ? { name: entry[1], expression: entry[2] } : null;
     }).filter(Boolean);
     const configIndex = declarations.findIndex((entry) => /\b(?:saltMul|fragMul)\s*:/.test(entry.expression));
+    if (configIndex < 0) continue;
+    const previous = previousArrayAndBuildDeclaration(chunk, declarationAt);
     const partsIndex = declarations.slice(0, configIndex).map((entry, index) => ({ entry, index })).reverse().find(({ entry }) => entry.expression.trim().startsWith("["))?.index;
-    if (configIndex < 1 || partsIndex === undefined) continue;
-    const build = bootstrapBuildDeclaration(chunk) ?? declarations[0];
-    const parts = declarations[partsIndex];
+    const build = bootstrapBuildDeclaration(chunk) ?? previous?.build ?? declarations[0];
+    const parts = partsIndex === undefined ? previous?.parts : declarations[partsIndex];
     const params = declarations[configIndex];
+    if (!build || !parts || !params) continue;
     const expression = `${build.expression};${parts.expression};${params.expression}`;
     const names = new Set([...expression.matchAll(/\b([A-Za-z_$][\w$]*)\s*\(/g)].map((entry) => entry[1]));
     const helpers = [];
