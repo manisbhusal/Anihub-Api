@@ -140,7 +140,7 @@ async function searchFn(query) {
 }
 
 async function resolveSeries(anilistId, ctx = {}) {
-  const cacheKey = `np:animegg:${anilistId}`;
+  const cacheKey = `np:match2:animegg:${anilistId}`;
   const cached = get(cacheKey);
   if (isFresh(cached)) return cached.data;
 

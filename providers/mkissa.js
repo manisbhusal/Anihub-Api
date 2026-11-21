@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { wreqFetch } from "../core/wreq.js";
+import { buildTitleSearchQueries, buildTitles, titleIdentityScore } from "../core/new-provider-utils.js";
 
 const __name = (fn, _) => fn;
 
@@ -1079,11 +1080,6 @@ async function fetchAniZip(anilistId) {
 }
 __name(fetchAniZip, "fetchAniZip");
 
-function normalize(s) {
-  return (s || "").toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
-}
-__name(normalize, "normalize");
-
 function extractYear(title) {
   if (!title) return null;
   const m = title.match(/\b(19\d{2}|20\d{2})\b/);
@@ -1092,44 +1088,22 @@ function extractYear(title) {
 __name(extractYear, "extractYear");
 
 function findBestMatch(results, titles, targetYear, targetId) {
-  const normalizedTitles = titles.map(normalize).filter(Boolean);
-  let bestShow = null;
-  let maxScore = -Infinity;
+  const scored = [];
   for (const r of results) {
     if (targetId && r.aniListId && String(r.aniListId) === String(targetId)) return r;
-    const names = [r.name, r.englishName, r.nativeName].map(normalize).filter(Boolean);
-    let nameScore = 0;
-    let isExact = false;
-    for (const n of names) {
-      if (normalizedTitles.includes(n)) {
-        nameScore = 100;
-        isExact = true;
-        break;
-      }
-    }
-    if (!isExact) {
-      let maxFuzzy = 0;
-      for (const rName of names) {
-        for (const t of normalizedTitles) {
-          if (t.includes(rName) || rName.includes(t)) {
-            const score = Math.min(rName.length, t.length);
-            const lengthPenalty = Math.abs(rName.length - t.length) * 0.1;
-            maxFuzzy = Math.max(maxFuzzy, score - lengthPenalty);
-          }
-        }
-      }
-      nameScore = maxFuzzy;
-    }
-    let yearScore = 0;
+    const titleScore = titleIdentityScore(titles, [r.name, r.englishName, r.nativeName]);
+    if (titleScore < 0.62) continue;
     const rYear = extractYear(r.name) || extractYear(r.englishName) || extractYear(r.nativeName);
-    if (targetYear && rYear) yearScore = rYear === targetYear ? 50 : -200;
-    const totalScore = nameScore + yearScore;
-    if (totalScore > maxScore) {
-      maxScore = totalScore;
-      bestShow = r;
-    }
+    const yearAdjustment = targetYear && rYear ? (rYear === targetYear ? 0.08 : -0.08) : 0;
+    scored.push({ show: r, score: titleScore + yearAdjustment });
   }
-  return bestShow || results[0];
+  scored.sort((left, right) => right.score - left.score);
+  const best = scored[0];
+  const runnerUp = scored[1];
+  if (!best || best.score < 0.62 || runnerUp && best.score - runnerUp.score < 0.06) {
+    throw new Error("MKissa title match is ambiguous");
+  }
+  return best.show;
 }
 __name(findBestMatch, "findBestMatch");
 
@@ -1153,38 +1127,27 @@ __name(fetchAniListMedia, "fetchAniListMedia");
 async function resolveMkissaId(anilistId, ctx = {}) {
   const [anizipRes, alMedia] = await Promise.all([
     ctx.anizip ? Promise.resolve(ctx.anizip) : fetchAniZip(anilistId).catch(() => ({})),
-    ctx.media ? Promise.resolve({ title: ctx.media.title, seasonYear: ctx.media.seasonYear, startDate: ctx.media.startDate }) : fetchAniListMedia(anilistId).catch(() => null)
+    ctx.media ? Promise.resolve(ctx.media) : fetchAniListMedia(anilistId).catch(() => null)
   ]);
   const anizip = anizipRes || {};
-  let titlesToTry = [];
-  if (anizip.titles) {
-    titlesToTry = [
-      anizip.titles.en,
-      anizip.titles.ja,
-      anizip.titles["x-jat"],
-      ...Object.values(anizip.titles)
-    ].filter(Boolean);
-  }
-  if (alMedia?.title) {
-    const alTitles = [alMedia.title.english, alMedia.title.romaji, alMedia.title.native].filter(Boolean);
-    titlesToTry = [...new Set([...alTitles, ...titlesToTry])];
-  }
+  let titlesToTry = [...new Set([...buildTitles(alMedia, anizip), ...Object.values(anizip.titles || {})].filter(Boolean))];
   if (!titlesToTry.length && anizip.mappings) {
     const apId = anizip.mappings.animeplanet_id;
     if (apId) titlesToTry = [apId.split(/[-_]/).map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ")];
   }
   if (!titlesToTry.length) throw new Error(`Could not resolve titles for AniList ID: ${anilistId}`);
   const targetYear = alMedia?.seasonYear || alMedia?.startDate?.year || null;
-  let allResults = [];
-  for (const title of titlesToTry.slice(0, 3)) {
-    allResults.push(...await searchMkissa(title, "sub"));
+  const queries = buildTitleSearchQueries(titlesToTry, 16);
+  const resultMap = new Map();
+  for (let index = 0; index < queries.length; index += 4) {
+    const batches = await Promise.all(queries.slice(index, index + 4).map((query) => searchMkissa(query, "sub").catch(() => [])));
+    for (const results of batches) {
+      for (const result of results) {
+        if (result?._id && !resultMap.has(result._id)) resultMap.set(result._id, result);
+      }
+    }
   }
-  const seen = new Set();
-  allResults = allResults.filter((r) => {
-    if (seen.has(r._id)) return false;
-    seen.add(r._id);
-    return true;
-  });
+  const allResults = [...resultMap.values()];
   if (!allResults.length) throw new Error(`No MKissa match for "${titlesToTry[0]}"`);
   const match = findBestMatch(allResults, titlesToTry, targetYear, anilistId);
   return { showId: match._id, show: match, anizip };

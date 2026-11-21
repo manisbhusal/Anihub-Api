@@ -101,7 +101,7 @@ async function scrapeEmbeds(epUrl) {
 }
 
 async function resolveSeries(anilistId, ctx = {}) {
-  const cacheKey = `np:animenosub:${anilistId}`;
+  const cacheKey = `np:match2:animenosub:${anilistId}`;
   const cached = get(cacheKey);
   if (isFresh(cached)) return cached.data;
 

@@ -1,12 +1,13 @@
 import { getMedia } from "../core/anilist.js";
 import {
   buildTitles,
+  buildTitleSearchQueries,
   decodeEntities,
-  diceCoeff,
   episodeMeta,
   expectedCount,
   getPrequelOffset,
   json,
+  titleIdentityScore,
 } from "../core/new-provider-utils.js";
 import { get, set, isFresh, SHOW_IDENTITY_TTL } from "../core/smartcache.js";
 
@@ -118,27 +119,7 @@ function expectedFormat(value) {
 }
 
 function searchQueries(titles) {
-  const queries = new Set();
-  for (const raw of titles.slice(0, 8)) {
-    const title = String(raw || "").replace(/\s+/g, " ").trim();
-    if (!title) continue;
-    queries.add(title);
-    const plain = title.replace(/[^\p{L}\p{N}]+/gu, " ").replace(/\s+/g, " ").trim();
-    if (plain.length >= 3) queries.add(plain);
-    const words = plain.split(/\s+/).filter(Boolean);
-    if (words.length > 4) queries.add(words.slice(0, 4).join(" "));
-    const family = plain
-      .replace(/\b(?:the\s+)?final\s+chapters?\b/gi, " ")
-      .replace(/\bfinal\s+(?:arc|edition)\b/gi, " ")
-      .replace(/\b(?:kanketsu|kouhen|zenpen)\s*(?:hen)?\b/gi, " ")
-      .replace(/\b(?:the\s+)?movie\b/gi, " ")
-      .replace(/\b(?:season|part|cour|chapter)\s*(?:\d+|one|two|three|four|final)?\b/gi, " ")
-      .replace(/\b(?:final|special)\s*(?:\d+|one|two|three|four)?\b/gi, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-    if (family.length >= 3) queries.add(family);
-  }
-  return [...queries].filter((query) => query.length >= 3).slice(0, 8);
+  return buildTitleSearchQueries(titles, 18);
 }
 
 function parseSearchItems(html) {
@@ -163,18 +144,15 @@ async function search(query) {
 }
 
 function candidateTitleScore(titles, candidate) {
-  let best = 0;
-  for (const title of titles) {
-    for (const value of candidate.titles) best = Math.max(best, diceCoeff(title, value));
-  }
-  return best;
+  return titleIdentityScore(titles, [...candidate.titles, candidate.slug.replace(/-/g, " ")]);
 }
 
 function coverageScore(candidate, expected, status) {
   if (!expected || expected < 1) return 0.5;
   if (candidate.episodeCount < 1) return 0;
+  if (status !== "FINISHED") return 1;
   if (expected < 6) return 1;
-  const needed = status === "FINISHED" ? Math.ceil(expected * 0.8) : Math.max(1, expected - 3);
+  const needed = Math.ceil(expected * 0.8);
   return Math.min(1, candidate.episodeCount / needed);
 }
 
@@ -182,17 +160,28 @@ function validateCandidate(candidate, media, titles, expected) {
   const titleScore = candidateTitleScore(titles, candidate);
   const format = expectedFormat(media?.format);
   const year = Number(media?.startDate?.year ?? media?.seasonYear ?? 0) || null;
-  if (titleScore < 0.68) return null;
+  const primaryTitles = [media?.title?.english, media?.title?.romaji, media?.title?.native].filter(Boolean);
+  const partOrdinal = Math.max(0, ...primaryTitles.map(ordinal));
+  const partMapping = expected === 1
+    && format === "special"
+    && candidate.type === "special"
+    && year
+    && candidate.year === year
+    && partOrdinal >= 2
+    && candidate.episodeCount === partOrdinal
+    && titleScore >= 0.65;
+  if (titleScore < 0.68 && !partMapping) return null;
   if (format && candidate.type && format !== candidate.type) return null;
   if (year && candidate.year && year !== candidate.year) return null;
   const coverage = coverageScore(candidate, expected, media?.status);
   if (expected >= 6 && coverage < 0.8) return null;
   const score = titleScore * 0.72 + (format && candidate.type === format ? 0.14 : 0.07) + (year && candidate.year === year ? 0.1 : 0.04) + coverage * 0.04;
-  return { ...candidate, titleScore, coverage, score };
+  const exactEpisodeCount = expected > 0 && candidate.episodeCount === expected;
+  return { ...candidate, titleScore, coverage, score, exactEpisodeCount, partOrdinal: partMapping ? partOrdinal : 0 };
 }
 
 async function resolveSeries(anilistId, ctx = {}) {
-  const cacheKey = `np:anizone:${anilistId}`;
+  const cacheKey = `np:match2:anizone:${anilistId}`;
   const cached = get(cacheKey);
   if (isFresh(cached)) return cached.data;
   const media = ctx.media ?? await getMedia(anilistId);
@@ -207,10 +196,14 @@ async function resolveSeries(anilistId, ctx = {}) {
   const valid = [...discovered.values()]
     .map((candidate) => validateCandidate(candidate, media, titles, expected))
     .filter(Boolean)
-    .sort((left, right) => right.score - left.score);
+    .sort((left, right) => right.score - left.score || Number(right.exactEpisodeCount) - Number(left.exactEpisodeCount));
   const selected = valid[0];
   const runnerUp = valid[1];
-  if (!selected || selected.score < 0.82 || runnerUp && selected.score - runnerUp.score < 0.08) {
+  const exactCountResolvesTie = selected?.exactEpisodeCount
+    && runnerUp
+    && !runnerUp.exactEpisodeCount
+    && selected.titleScore >= runnerUp.titleScore - 0.02;
+  if (!selected || (selected.score < 0.82 && !selected.partOrdinal) || (runnerUp && selected.score - runnerUp.score < 0.08 && !exactCountResolvesTie)) {
     throw new Error(`AniZone match not confident for AniList ${anilistId}`);
   }
   const data = {
@@ -218,6 +211,10 @@ async function resolveSeries(anilistId, ctx = {}) {
     title: selected.title,
     matchScore: selected.titleScore,
     score: selected.score,
+    type: selected.type,
+    year: selected.year,
+    episodeCount: selected.episodeCount,
+    partOrdinal: selected.partOrdinal,
   };
   set(cacheKey, data, SHOW_IDENTITY_TTL);
   return data;
@@ -371,12 +368,13 @@ function ordinal(value) {
   return Number(match[1]) || words[match[1]] || 0;
 }
 
-function alignEpisodes(episodes, media, expected) {
+function alignEpisodes(episodes, media, expected, series) {
   if (!expected || episodes.length <= expected) return episodes;
   const titles = [media?.title?.english, media?.title?.romaji, media?.title?.native].filter(Boolean);
   const target = Math.max(0, ...titles.map(ordinal));
   if (target < 2) return episodes;
-  const start = episodes.findIndex((episode) => ordinal(episode.title) === target);
+  let start = episodes.findIndex((episode) => ordinal(episode.title) === target);
+  if (start < 0 && series?.partOrdinal === target && episodes.length === target) start = target - 1;
   if (start < 0 || episodes.length - start < expected) return episodes;
   return episodes.slice(start, start + expected).map((episode, index) => ({ ...episode, number: index + 1 }));
 }
@@ -413,7 +411,7 @@ async function seriesEpisodes(anilistId, ctx = {}) {
     getPrequelOffset(anilistId).catch(() => 0),
   ]);
   const expected = expectedCount(media, ctx.anizip);
-  const limit = expected ? expected + offset : Infinity;
+  const limit = expected ? Math.max(expected, series.partOrdinal || 0) + offset : Infinity;
   const maxPages = Number.isFinite(ctx.maxPages) ? Math.max(1, ctx.maxPages) : Infinity;
   const rawEpisodes = await scrapeSeries(series.slug, limit, maxPages);
   const mode = chooseMode(rawEpisodes, expected, offset);
@@ -424,7 +422,7 @@ async function seriesEpisodes(anilistId, ctx = {}) {
     offset,
     expected,
     mode,
-    episodes: alignEpisodes(rawEpisodes, media, expected),
+    episodes: alignEpisodes(rawEpisodes, media, expected, series),
   };
 }
 

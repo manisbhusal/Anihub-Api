@@ -1,9 +1,10 @@
 import {
+  buildTitleSearchQueries,
   buildTitles,
-  diceCoeff,
   episodeMeta,
   expectedCount,
   json,
+  titleIdentityScore,
 } from "../core/new-provider-utils.js";
 import { getMedia } from "../core/anilist.js";
 import {
@@ -96,11 +97,7 @@ function scoreCandidate(candidate, titles, seasonYear, anilistFormat) {
   const kaaYear = Number(candidate.year);
   const kaaType = (candidate.type || "").toLowerCase();
 
-  let base = 0;
-  for (const t of titles.slice(0, 3)) {
-    if (/[\u3000-\u9fff\u4e00-\u9faf]/.test(t)) continue;
-    base = Math.max(base, diceCoeff(t, titleEn), diceCoeff(t, titleJp));
-  }
+  const base = titleIdentityScore(titles, [titleEn, titleJp, candidate.slug]);
 
   let yearMult = 1.0;
   if (seasonYear && kaaYear) {
@@ -121,13 +118,13 @@ function scoreCandidate(candidate, titles, seasonYear, anilistFormat) {
 }
 
 async function resolveSeries(anilistId, ctx = {}) {
-  const cacheKey = `np:kaa:${anilistId}`;
+  const cacheKey = `np:match2:kaa:${anilistId}`;
   const cached = cacheGet(cacheKey);
   if (isFresh(cached)) return cached.data;
 
   const media = ctx.media ?? await getMedia(anilistId);
   const titles = buildTitles(media, ctx.anizip);
-  const queries = buildKaaQueries(titles);
+  const queries = [...new Set([...buildKaaQueries(titles), ...buildTitleSearchQueries(titles, 12)])].slice(0, 20);
   const seasonYear = media?.seasonYear;
   const format = media?.format;
 
@@ -198,6 +195,27 @@ async function buildEpMap(showSlug, showInfo) {
   }));
 }
 
+function titleOrdinal(value) {
+  const match = String(value || "").toLowerCase().match(/\b(?:part|special|chapter)\s*(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b/);
+  if (!match) return 0;
+  const words = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+  return Number(match[1]) || words[match[1]] || 0;
+}
+
+function alignEpisodes(episodes, media, expected) {
+  if (!expected || episodes.length <= expected) return episodes;
+  const titles = [media?.title?.english, media?.title?.romaji, media?.title?.native].filter(Boolean);
+  const targetOrdinal = Math.max(0, ...titles.map(titleOrdinal));
+  if (targetOrdinal < 2) return episodes;
+  const start = episodes.findIndex((episode) => titleOrdinal(episode.title) === targetOrdinal);
+  if (start < 0 || episodes.length - start < expected) return episodes;
+  return episodes.slice(start, start + expected).map((episode, index) => ({
+    ...episode,
+    sourceNumber: episode.number,
+    number: index + 1,
+  }));
+}
+
 export async function getEpisodes(anilistId, ctx = {}) {
   const media = ctx.media ?? await getMedia(anilistId);
   const localCtx = { ...ctx, media };
@@ -207,10 +225,10 @@ export async function getEpisodes(anilistId, ctx = {}) {
   const locales = Array.isArray(showInfo.locales) ? showInfo.locales : series.locales;
   const hasDub = locales.includes("en-US");
 
-  const epMap = await buildEpMap(series.slug, showInfo);
+  const expected = expectedCount(media, ctx.anizip);
+  const epMap = alignEpisodes(await buildEpMap(series.slug, showInfo), media, expected);
   if (!epMap.length) throw new Error(`KAA: no episodes found for AniList ${anilistId} (slug: ${series.slug})`);
 
-  const expected = expectedCount(media, ctx.anizip);
   const sub = [];
   const dub = [];
 
@@ -228,6 +246,7 @@ export async function getEpisodes(anilistId, ctx = {}) {
       description: meta.description,
       image: meta.image,
       airDate: meta.airDate,
+      sourceNumber: ep.sourceNumber ?? ep.number,
     };
     sub.push({ id: `watch/kaa/${anilistId}/sub/kaa-${num}`, ...base, audio: "sub" });
     if (hasDub) {
@@ -247,7 +266,8 @@ export async function getEpisodes(anilistId, ctx = {}) {
 }
 
 async function handleWatch(anilistId, audio, epNum) {
-  const series = await resolveSeries(anilistId);
+  const media = await getMedia(anilistId);
+  const series = await resolveSeries(anilistId, { media });
   const showInfo = await kaaShowInfo(series.slug);
 
   const locales = Array.isArray(showInfo.locales) ? showInfo.locales : series.locales;
@@ -255,7 +275,11 @@ async function handleWatch(anilistId, audio, epNum) {
     return json({ error: `KAA: no English dub for AniList ${anilistId}` }, 404);
   }
 
-  const epMap = await buildEpMap(series.slug, showInfo);
+  const epMap = alignEpisodes(
+    await buildEpMap(series.slug, showInfo),
+    media,
+    expectedCount(media),
+  );
   const ep = epMap.find((e) => e.number === Number(epNum));
   if (!ep) {
     return json({ error: `KAA: episode ${epNum} not found for AniList ${anilistId}` }, 404);

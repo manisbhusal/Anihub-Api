@@ -1,11 +1,11 @@
 import { getMedia } from "../core/anilist.js";
 import {
     buildTitles,
-    diceCoeff,
+    buildTitleSearchQueries,
     episodeMeta,
     expectedCount,
     json,
-    norm,
+    titleIdentityScore,
 } from "../core/new-provider-utils.js";
 import { get, set, isFresh, SHOW_IDENTITY_TTL } from "../core/smartcache.js";
 
@@ -142,37 +142,12 @@ async function search(query, retry = true) {
 }
 
 function searchQueries(titles) {
-    const queries = new Set();
-    for (const raw of titles.slice(0, 10)) {
-        const title = String(raw || "").replace(/\s+/g, " ").trim();
-        if (!title) continue;
-        queries.add(title);
-        const plain = title.replace(/[^\p{L}\p{N}]+/gu, " ").replace(/\s+/g, " ").trim();
-        if (plain.length >= 3) queries.add(plain);
-        const words = plain.split(/\s+/).filter(Boolean);
-        if (words.length > 4) queries.add(words.slice(0, 6).join(" "));
-        if (words.length > 6) queries.add(words.slice(0, 4).join(" "));
-        const family = plain
-            .replace(/\b(?:the\s+)?final\s+chapters?\b/gi, " ")
-            .replace(/\b(?:season|part|cour|chapter)\s*(?:\d+|one|two|three|four|five|final)?\b/gi, " ")
-            .replace(/\b(?:the\s+)?movie\b/gi, " ")
-            .replace(/\s+/g, " ")
-            .trim();
-        if (family.length >= 3) queries.add(family);
-    }
-    return [...queries].filter((query) => query.length >= 3).slice(0, 16);
+    return buildTitleSearchQueries(titles, 20);
 }
 
 function titleScore(titles, candidate) {
     const values = [candidate.content_title_en, candidate.content_title, candidate.content_title_jp].filter(Boolean);
-    let score = 0;
-    for (const title of titles) {
-        for (const value of values) {
-            if (!norm(title) || !norm(value)) continue;
-            score = Math.max(score, diceCoeff(title, value));
-        }
-    }
-    return score;
+    return titleIdentityScore(titles, values);
 }
 
 async function inspectCandidate(candidate) {
@@ -182,6 +157,14 @@ async function inspectCandidate(candidate) {
         const video = await apiJson(`/v4/content/${encodeURIComponent(contentId)}/video/1`);
         const metadata = video?.metadata;
         if (!metadata) return null;
+        const episodeValues = Array.isArray(metadata.episode) ? metadata.episode : [metadata.episode];
+        let episodeMap = null;
+        for (const value of episodeValues) {
+            if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+            if (Object.entries(value).some(([number, episode]) => /^\d+$/.test(number) && episode && typeof episode === "object" && (episode.contentTitle_episode_en || episode.contentTitle_episode_jp))) {
+                episodeMap = value;
+            }
+        }
         return {
             contentId,
             title: candidate.content_title_en || candidate.content_title || "",
@@ -189,15 +172,27 @@ async function inspectCandidate(candidate) {
             malId: Number(metadata.mal_id) || null,
             episodeCount: Number(metadata.total_episodes) || 0,
             isMovie: Boolean(metadata.is_movie),
+            episodeTitles: Object.entries(episodeMap || {}).map(([number, episode]) => ({
+                number: Number(number),
+                title: episode.contentTitle_episode_en || episode.contentTitle_episode_jp || "",
+            })).filter((episode) => Number.isInteger(episode.number) && episode.number >= 1),
         };
     } catch {
         return null;
     }
 }
 
-function coverageScore(episodeCount, expected) {
+function titleOrdinal(value) {
+    const match = String(value || "").toLowerCase().match(/\b(?:part|special|chapter)\s*(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b/);
+    if (!match) return 0;
+    const words = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+    return Number(match[1]) || words[match[1]] || 0;
+}
+
+function coverageScore(episodeCount, expected, status) {
     if (!expected || expected < 2) return 1;
     if (!episodeCount) return 0.5;
+    if (status !== "FINISHED") return 1;
     if (episodeCount === expected) return 1;
     if (episodeCount > expected && episodeCount <= expected + 2) return 0.95;
     return Math.min(1, episodeCount / expected);
@@ -207,22 +202,31 @@ function validateCandidate(candidate, media, titles, expected) {
     const title = titleScore(titles, candidate.candidate);
     const expectedMovie = media?.format === "MOVIE";
     if (candidate.isMovie !== expectedMovie) return null;
-    const coverage = coverageScore(candidate.episodeCount, expected);
+    const primaryTitles = [media?.title?.english, media?.title?.romaji, media?.title?.native].filter(Boolean);
+    const partOrdinal = Math.max(0, ...primaryTitles.map(titleOrdinal));
+    const partMapping = expected === 1
+        && media?.format === "SPECIAL"
+        && partOrdinal >= 2
+        && candidate.episodeCount === partOrdinal
+        && candidate.episodeTitles.some((episode) => episode.number === partOrdinal)
+        && title >= 0.65;
+    const coverage = coverageScore(candidate.episodeCount, expected, media?.status);
     if (expected >= 6) {
-        const minimum = media?.status === "FINISHED" ? Math.ceil(expected * 0.8) : Math.max(1, expected - 3);
-        if (candidate.episodeCount && candidate.episodeCount < minimum) return null;
+        const minimum = media?.status === "FINISHED" ? Math.ceil(expected * 0.8) : 1;
+        if (candidate.episodeCount < minimum) return null;
     }
-    if (title < 0.7) return null;
+    if (title < 0.7 && !partMapping) return null;
     return {
         ...candidate,
         titleScore: title,
         coverage,
         score: title * 0.7 + coverage * 0.2 + 0.1,
+        partOrdinal: partMapping ? partOrdinal : 0,
     };
 }
 
 async function resolveSeries(anilistId, ctx = {}) {
-    const cacheKey = `np:animeonsen:${anilistId}`;
+    const cacheKey = `np:match2:animeonsen:${anilistId}`;
     const cached = get(cacheKey);
     if (isFresh(cached)) return cached.data;
     const media = ctx.media ?? await getMedia(anilistId);
@@ -255,7 +259,7 @@ async function resolveSeries(anilistId, ctx = {}) {
         .sort((left, right) => right.score - left.score);
     const selected = validated[0];
     const runnerUp = validated[1];
-    if (!selected || (!exact.length && (selected.score < 0.82 || runnerUp && selected.score - runnerUp.score < 0.08))) {
+    if (!selected || (!exact.length && ((selected.score < 0.82 && !selected.partOrdinal) || (runnerUp && selected.score - runnerUp.score < 0.08)))) {
         throw new Error(`AnimeOnsen match not confident for AniList ${anilistId}`);
     }
     const data = {
@@ -266,6 +270,7 @@ async function resolveSeries(anilistId, ctx = {}) {
         isMovie: selected.isMovie,
         matchScore: selected.titleScore,
         score: selected.score,
+        partOrdinal: selected.partOrdinal,
     };
     set(cacheKey, data, SHOW_IDENTITY_TTL);
     return data;
@@ -284,6 +289,17 @@ async function fetchEpisodes(series) {
     if (episodes.length) return episodes;
     if (series.isMovie) return [{ number: 1, sourceNumber: "1", title: null }];
     throw new Error(`AnimeOnsen has no episodes for ${series.contentId}`);
+}
+
+function alignEpisodes(episodes, media, expected, series) {
+    if (!expected || episodes.length <= expected) return episodes;
+    const titles = [media?.title?.english, media?.title?.romaji, media?.title?.native].filter(Boolean);
+    const targetOrdinal = Math.max(0, ...titles.map(titleOrdinal));
+    if (targetOrdinal < 2) return episodes;
+    let start = episodes.findIndex((episode) => titleOrdinal(episode.title) === targetOrdinal);
+    if (start < 0 && series?.partOrdinal === targetOrdinal && episodes.length === targetOrdinal) start = targetOrdinal - 1;
+    if (start < 0 || episodes.length - start < expected) return episodes;
+    return episodes.slice(start, start + expected).map((episode, index) => ({ ...episode, number: index + 1 }));
 }
 
 function episodeList(anilistId, episodes, ctx, expected) {
@@ -324,7 +340,7 @@ export async function getEpisodes(anilistId, ctx = {}) {
             episodeOffset: 0,
         },
         episodes: {
-            sub: episodeList(anilistId, await fetchEpisodes(series), localCtx, expected),
+            sub: episodeList(anilistId, alignEpisodes(await fetchEpisodes(series), media, expected, series), localCtx, expected),
             dub: [],
         },
     };
@@ -352,7 +368,8 @@ async function handleWatch(anilistId, audio, epNum, ctx = {}) {
     const media = ctx.media ?? await getMedia(anilistId);
     const series = await resolveSeries(anilistId, { ...ctx, media });
     const expected = expectedCount(media, ctx.anizip);
-    const episode = (await fetchEpisodes(series)).find((item) => item.number === Number(epNum) && (!expected || item.number <= expected));
+    const episodes = alignEpisodes(await fetchEpisodes(series), media, expected, series);
+    const episode = episodes.find((item) => item.number === Number(epNum) && (!expected || item.number <= expected));
     if (!episode) throw new Error(`AnimeOnsen episode ${epNum} not found`);
     const video = await apiJson(`/v4/content/${encodeURIComponent(series.contentId)}/video/${encodeURIComponent(episode.sourceNumber)}`);
     const stream = video?.uri?.stream;
@@ -365,7 +382,7 @@ async function handleWatch(anilistId, audio, epNum, ctx = {}) {
     return json({
         anilistId: Number(anilistId),
         episode: Number(epNum),
-        providerEpisode: episode.number,
+        providerEpisode: episode.sourceNumber,
         audio,
         intro: skipRange(skip?.skipIntro_s, skip?.skipIntro_e),
         outro: null,

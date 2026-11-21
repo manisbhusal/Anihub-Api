@@ -1,6 +1,6 @@
 {
   "name": "all-api",
-  "version": "2.2.1",
+  "version": "2.3.0",
   "type": "module",
   "main": "server.js",
   "scripts": {
@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "dotenv": "^16.4.5",
+    "playwright-core": "^1.63.0",
     "wreq-js": "^3.2.0"
   }
 }
